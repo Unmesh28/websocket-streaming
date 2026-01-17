@@ -44,6 +44,25 @@ sudo apt install -y \
     alsa-utils \
     pulseaudio
 
+# Install libcamera for Raspberry Pi CSI Camera support (OV5647, IMX219, etc.)
+echo "Installing libcamera for Pi Camera Module..."
+sudo apt install -y \
+    libcamera-apps \
+    libcamera-dev \
+    gstreamer1.0-libcamera
+
+# Enable camera interface
+echo "Checking camera configuration..."
+if grep -q "^start_x=1" /boot/config.txt 2>/dev/null || grep -q "^camera_auto_detect=1" /boot/firmware/config.txt 2>/dev/null; then
+    echo "Camera already enabled in config"
+else
+    echo "Note: You may need to enable the camera interface:"
+    echo "  - Run: sudo raspi-config"
+    echo "  - Go to: Interface Options -> Camera -> Enable"
+    echo "  - Or add 'camera_auto_detect=1' to /boot/firmware/config.txt (Bookworm)"
+    echo "  - Reboot after enabling"
+fi
+
 # Install Node.js (for signaling server)
 echo "Installing Node.js..."
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -

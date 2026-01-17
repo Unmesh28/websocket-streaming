@@ -2,36 +2,98 @@
 
 Production-ready C++ WebRTC streaming solution for Raspberry Pi with audio and video support.
 
-## 🎯 Features
+## Supported Camera: Raspberry Pi IR Night Vision Camera (OV5647 5MP)
 
-- ✅ Real-time audio and video streaming from Raspberry Pi
-- ✅ WebRTC-based low latency (~300-500ms)
-- ✅ Multiple simultaneous viewers (5-10 viewers per stream)
-- ✅ Production-optimized C++ code using GStreamer
-- ✅ WebSocket signaling server (Node.js)
-- ✅ HTML viewer interface
-- ✅ ngrok tunneling for remote access
-- ✅ Support for USB cameras and Pi Camera
-- ✅ H.264 hardware encoding
-- ✅ Opus audio encoding
+This system is optimized for the **Raspberry Pi Infrared IR Night Vision Surveillance Camera Module (5MP)** with the following specifications:
 
-## 📋 Requirements
+| Specification | Value |
+|--------------|-------|
+| Sensor | OV5647 |
+| Resolution | 5MP (2592x1944 still, 1080p30 video) |
+| Interface | CSI (15-pin ribbon cable) |
+| Video Modes | 1080p30, 720p60, VGA90 |
+| Field of View | 54x41 degrees (standard) |
+| Night Vision | IR LEDs (1-2m range) |
+| IR Cut Filter | Automatic switching |
+
+## Features
+
+- Real-time audio and video streaming from Raspberry Pi
+- WebRTC-based low latency (~300-500ms)
+- Multiple simultaneous viewers (5-10 viewers per stream)
+- Production-optimized C++ code using GStreamer
+- WebSocket signaling server (Node.js)
+- HTML viewer interface
+- ngrok tunneling for remote access
+- Support for both CSI cameras (Pi Camera) and USB cameras
+- H.264 video encoding
+- Opus audio encoding
+- IR Night Vision support
+
+## Requirements
 
 ### Hardware
 - Raspberry Pi 4 (recommended) or Pi 3B+
-- USB Camera or Raspberry Pi Camera Module
+- **Raspberry Pi IR Night Vision Camera Module (OV5647 5MP)** - CSI interface
 - USB Microphone or audio input device
 - MicroSD card (16GB+ recommended)
 - Stable internet connection
 
 ### Software
-- Raspberry Pi OS (Bullseye or newer)
+- Raspberry Pi OS (Bookworm or Bullseye)
 - GCC 7.0 or newer
 - CMake 3.10 or newer
 - Node.js 14 or newer
 - ngrok account (free tier works)
 
-## 🚀 Quick Start Guide
+## Hardware Setup: IR Camera Installation
+
+### Step 1: Connect the Camera
+
+1. **Power off** your Raspberry Pi
+2. Locate the **CSI camera port** (between HDMI and audio jack)
+3. Gently pull up the plastic clip on the CSI connector
+4. Insert the ribbon cable with the **blue side facing the Ethernet port** (silver contacts facing HDMI)
+5. Push down the plastic clip to secure the cable
+6. Power on the Raspberry Pi
+
+### Step 2: Enable Camera Interface
+
+**For Raspberry Pi OS Bookworm (newer):**
+```bash
+# Edit boot config
+sudo nano /boot/firmware/config.txt
+
+# Add or ensure this line exists:
+camera_auto_detect=1
+
+# Save and reboot
+sudo reboot
+```
+
+**For Raspberry Pi OS Bullseye (older):**
+```bash
+sudo raspi-config
+# Navigate to: Interface Options -> Camera -> Enable
+sudo reboot
+```
+
+### Step 3: Verify Camera Detection
+
+```bash
+# Check if camera is detected
+libcamera-hello --list-cameras
+
+# You should see output like:
+# Available cameras
+# -----------------
+# 0 : ov5647 [2592x1944] (/base/soc/i2c0mux/i2c@1/ov5647@36)
+
+# Test camera with preview (5 seconds)
+libcamera-hello -t 5000
+```
+
+## Quick Start Guide
 
 ### Step 1: Transfer Files to Raspberry Pi
 
@@ -85,11 +147,16 @@ ngrok config add-authtoken YOUR_AUTHTOKEN_HERE
 ### Step 6: Test Camera and Audio
 
 ```bash
-# List cameras
-v4l2-ctl --list-devices
+# Test CSI Camera (Pi Camera Module with libcamera)
+libcamera-hello --list-cameras
+libcamera-hello -t 5000  # 5 second preview
 
-# Test camera (should show video)
-gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
+# Test with GStreamer (same pipeline used for streaming)
+gst-launch-1.0 libcamerasrc ! video/x-raw,width=1280,height=720 ! videoconvert ! autovideosink
+
+# For USB cameras, use:
+# v4l2-ctl --list-devices
+# gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
 
 # List audio devices
 arecord -l
@@ -143,13 +210,22 @@ WebSocket URL: wss://abc123.ngrok-free.app
 # Open new terminal
 cd ~/webrtc_pi_streaming
 
-# Run with ngrok URL (replace with your actual URL from step above)
+# Run with CSI Camera (default - for Pi IR Camera Module)
 ./build/webrtc_streamer wss://abc123.ngrok-free.app
 
-# Or with custom parameters:
-# ./build/webrtc_streamer <signaling_url> <stream_id> <video_device> <audio_device>
-# Example:
-# ./build/webrtc_streamer wss://abc123.ngrok-free.app my-stream /dev/video0 default
+# Full command format:
+# ./build/webrtc_streamer <signaling_url> <stream_id> <video_device> <audio_device> <camera_type>
+#
+# camera_type options:
+#   csi - Raspberry Pi Camera Module (CSI interface) - DEFAULT
+#   usb - USB webcam
+
+# Examples:
+# CSI Camera (Pi IR Camera):
+./build/webrtc_streamer wss://abc123.ngrok-free.app my-stream /dev/video0 default csi
+
+# USB Camera:
+./build/webrtc_streamer wss://abc123.ngrok-free.app my-stream /dev/video0 default usb
 ```
 
 You should see:
@@ -273,18 +349,42 @@ arecord -l
 
 ## 🐛 Troubleshooting
 
-### Camera Not Detected
+### CSI Camera Not Detected (Pi IR Camera)
 
 ```bash
-# Check if camera is connected
+# Check if CSI camera is detected
+libcamera-hello --list-cameras
+
+# If not detected, check the ribbon cable connection:
+# - Power off the Pi
+# - Reseat the ribbon cable (blue side facing Ethernet port)
+# - Power on and try again
+
+# Enable camera in boot config (Bookworm):
+sudo nano /boot/firmware/config.txt
+# Add: camera_auto_detect=1
+sudo reboot
+
+# Enable camera (Bullseye):
+sudo raspi-config
+# Interface Options -> Camera -> Enable
+sudo reboot
+
+# Check kernel modules
+lsmod | grep camera
+
+# If using legacy camera stack (not recommended):
+# sudo modprobe bcm2835-v4l2
+```
+
+### USB Camera Not Detected
+
+```bash
+# Check if USB camera is connected
 v4l2-ctl --list-devices
 
-# For Pi Camera, enable it:
-sudo raspi-config
-# Interface Options → Camera → Enable
-
-# Reboot
-sudo reboot
+# Test USB camera
+gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
 ```
 
 ### Audio Not Working
@@ -346,12 +446,12 @@ htop
 4. Check firewall/antivirus settings
 5. Verify ngrok URL is correct
 
-## 📝 Usage Examples
+## Usage Examples
 
-### Basic Usage
+### Basic Usage (CSI IR Camera - Default)
 
 ```bash
-# Default stream
+# Default stream with CSI camera
 ./build/webrtc_streamer wss://YOUR_NGROK_URL.ngrok-free.app
 ```
 
@@ -362,21 +462,31 @@ htop
 ./build/webrtc_streamer wss://YOUR_URL my-custom-stream
 ```
 
-### Different Camera
+### USB Camera
 
 ```bash
-# Use specific camera
-./build/webrtc_streamer wss://YOUR_URL pi-stream /dev/video1
+# Use USB camera instead of CSI
+./build/webrtc_streamer wss://YOUR_URL pi-stream /dev/video0 default usb
 ```
 
 ### Full Custom Configuration
 
 ```bash
+# CSI Camera (Pi IR Night Vision):
 ./build/webrtc_streamer \
     wss://abc123.ngrok-free.app \
     vehicle-001 \
-    /dev/video1 \
-    hw:1,0
+    /dev/video0 \
+    hw:1,0 \
+    csi
+
+# USB Camera:
+./build/webrtc_streamer \
+    wss://abc123.ngrok-free.app \
+    vehicle-001 \
+    /dev/video0 \
+    hw:1,0 \
+    usb
 ```
 
 ## 🔐 Security Notes

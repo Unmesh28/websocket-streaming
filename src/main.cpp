@@ -15,9 +15,11 @@ void signalHandler(int signum) {
 
 class StreamManager {
 public:
-    StreamManager(const std::string& signaling_url, const std::string& stream_id)
+    StreamManager(const std::string& signaling_url, const std::string& stream_id,
+                  WebRTCStream::CameraType camera_type = WebRTCStream::CameraType::CSI)
         : stream_id_(stream_id)
-        , signaling_(signaling_url) {
+        , signaling_(signaling_url)
+        , camera_type_(camera_type) {
         
         // Setup signaling callbacks
         signaling_.setOnViewerJoined([this](const std::string& viewer_id) {
@@ -105,6 +107,7 @@ private:
     std::string stream_id_;
     std::string video_device_;
     std::string audio_device_;
+    WebRTCStream::CameraType camera_type_;
     SignalingClient signaling_;
     std::map<std::string, std::shared_ptr<WebRTCStream>> viewer_streams_;
     
@@ -115,7 +118,7 @@ private:
         auto stream = std::make_shared<WebRTCStream>(stream_id_ + "-" + viewer_id);
         
         std::cout << "    Initializing stream..." << std::endl;
-        if (!stream->initialize(video_device_, audio_device_)) {
+        if (!stream->initialize(video_device_, audio_device_, camera_type_)) {
             std::cerr << "    [ERROR] Failed to initialize stream" << std::endl;
             return;
         }
@@ -173,30 +176,42 @@ int main(int argc, char* argv[]) {
     // Handle Ctrl+C
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
-    
+
     // Parse arguments
     std::string signaling_url = "ws://localhost:8080"; // Default (will use ngrok)
     std::string stream_id = "pi-camera-stream";
     std::string video_device = "/dev/video0";
     std::string audio_device = "default";
-    
+    std::string camera_type_str = "csi";  // Default to CSI for Pi Camera Module
+
     if (argc > 1) signaling_url = argv[1];
     if (argc > 2) stream_id = argv[2];
     if (argc > 3) video_device = argv[3];
     if (argc > 4) audio_device = argv[4];
-    
+    if (argc > 5) camera_type_str = argv[5];
+
+    // Parse camera type
+    WebRTCStream::CameraType camera_type = WebRTCStream::CameraType::CSI;
+    if (camera_type_str == "usb" || camera_type_str == "USB") {
+        camera_type = WebRTCStream::CameraType::USB;
+    }
+
+    std::string camera_display = (camera_type == WebRTCStream::CameraType::CSI)
+        ? "CSI (Pi Camera Module)"
+        : "USB (" + video_device + ")";
+
     std::cout << "\n=====================================" << std::endl;
     std::cout << "  WebRTC Streamer for Raspberry Pi" << std::endl;
     std::cout << "=====================================" << std::endl;
     std::cout << "Signaling: " << signaling_url << std::endl;
     std::cout << "Stream ID: " << stream_id << std::endl;
-    std::cout << "Video:     " << video_device << std::endl;
+    std::cout << "Camera:    " << camera_display << std::endl;
     std::cout << "Audio:     " << audio_device << std::endl;
     std::cout << "=====================================\n" << std::endl;
-    
+
     // Create and start stream manager
-    StreamManager manager(signaling_url, stream_id);
-    
+    StreamManager manager(signaling_url, stream_id, camera_type);
+
     if (!manager.start(video_device, audio_device)) {
         return 1;
     }

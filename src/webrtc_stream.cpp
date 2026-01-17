@@ -14,26 +14,47 @@ WebRTCStream::~WebRTCStream() {
     stop();
 }
 
-bool WebRTCStream::initialize(const std::string& video_device, 
-                              const std::string& audio_device) {
+bool WebRTCStream::initialize(const std::string& video_device,
+                              const std::string& audio_device,
+                              CameraType camera_type) {
     // Initialize GStreamer
     gst_init(nullptr, nullptr);
-    
-    return createPipeline(video_device, audio_device);
+
+    return createPipeline(video_device, audio_device, camera_type);
 }
 
 bool WebRTCStream::createPipeline(const std::string& video_device,
-                                  const std::string& audio_device) {
+                                  const std::string& audio_device,
+                                  CameraType camera_type) {
     GError* error = nullptr;
-    
+
+    // Build video source based on camera type
+    std::string video_source;
+
+    if (camera_type == CameraType::CSI) {
+        // Raspberry Pi CSI Camera (OV5647, IMX219, etc.) using libcamera
+        // Optimized for the 5MP OV5647 IR Night Vision Camera
+        std::cout << "Using CSI camera (libcamerasrc) - Pi Camera Module" << std::endl;
+        video_source =
+            "libcamerasrc ! "
+            "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+            "videoconvert ! "
+            "queue max-size-buffers=1 leaky=downstream ! ";
+    } else {
+        // USB Camera using v4l2
+        std::cout << "Using USB camera (v4l2src) - device: " << video_device << std::endl;
+        video_source =
+            "v4l2src device=" + video_device + " ! "
+            "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+            "videoconvert ! "
+            "queue max-size-buffers=1 leaky=downstream ! ";
+    }
+
     // Create optimized pipeline for Raspberry Pi
-    std::string pipeline_str = 
-        // Video source
-        "v4l2src device=" + video_device + " ! "
-        "video/x-raw,width=1280,height=720,framerate=30/1 ! "
-        "videoconvert ! "
-        "queue max-size-buffers=1 leaky=downstream ! "
-        
+    std::string pipeline_str =
+        // Video source (CSI or USB)
+        video_source +
+
         // H264 encoding
         "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 ! "
         "video/x-h264,profile=baseline ! "
@@ -41,18 +62,18 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
         "queue ! "
         "rtph264pay config-interval=-1 pt=96 ! "
         "queue ! "
-        
+
         // WebRTC bin
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
         "webrtcbin name=webrtc bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302 "
-        
+
         // Audio source
         "alsasrc device=" + audio_device + " ! "
         "audioconvert ! "
         "audioresample ! "
         "audio/x-raw,rate=48000,channels=1 ! "
         "queue max-size-buffers=1 leaky=downstream ! "
-        
+
         // Opus encoding
         "opusenc bitrate=32000 ! "
         "rtpopuspay pt=97 ! "
