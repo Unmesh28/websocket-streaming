@@ -50,10 +50,12 @@
         video {
             width: 100%;
             max-width: 1280px;
+            min-height: 400px;
             border-radius: 10px;
-            background: black;
+            background: #000;
             display: block;
             margin: 0 auto;
+            object-fit: contain;
         }
 
         .controls {
@@ -370,8 +372,23 @@
 
             // Handle incoming stream
             pc.ontrack = (event) => {
-                console.log('Received stream');
-                video.srcObject = event.streams[0];
+                console.log('Received stream', event.streams[0]);
+                console.log('Track kind:', event.track.kind);
+
+                if (event.streams && event.streams[0]) {
+                    video.srcObject = event.streams[0];
+
+                    // Force play (handle autoplay restrictions)
+                    video.play().then(() => {
+                        console.log('Video playing');
+                    }).catch(err => {
+                        console.log('Autoplay blocked, click to play:', err);
+                        // Show play button or unmute hint
+                        video.muted = true;
+                        video.play();
+                    });
+                }
+
                 updateStatus('Connected');
                 disconnectBtn.disabled = false;
             };
