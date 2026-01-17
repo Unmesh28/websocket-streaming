@@ -12,9 +12,16 @@ public:
     WebRTCStream(const std::string& stream_id);
     ~WebRTCStream();
 
+    // Camera types
+    enum class CameraType {
+        CSI,    // Raspberry Pi Camera Module (CSI interface) - uses libcamerasrc
+        USB     // USB Webcam - uses v4l2src
+    };
+
     // Initialize stream with camera and audio
     bool initialize(const std::string& video_device = "/dev/video0",
-                   const std::string& audio_device = "default");
+                   const std::string& audio_device = "default",
+                   CameraType camera_type = CameraType::CSI);
     
     // Start streaming
     bool start();
@@ -60,8 +67,9 @@ private:
     static void onOfferCreated(GstPromise* promise, gpointer user_data);
     
     // Pipeline creation
-    bool createPipeline(const std::string& video_device, 
-                       const std::string& audio_device);
+    bool createPipeline(const std::string& video_device,
+                       const std::string& audio_device,
+                       CameraType camera_type);
 };
 
 #endif // WEBRTC_STREAM_H
