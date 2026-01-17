@@ -56,12 +56,12 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
         // Video source (CSI or USB)
         video_source +
 
-        // H264 encoding
-        "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 ! "
-        "video/x-h264,profile=baseline ! "
-        "h264parse ! "
-        "queue ! "
-        "rtph264pay config-interval=-1 pt=96 ! "
+        // H264 encoding - with keyframes every 30 frames for reliable decoding
+        "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 ! "
+        "video/x-h264,profile=constrained-baseline,level=(string)3.1 ! "
+        "h264parse config-interval=-1 ! "
+        "queue max-size-time=100000000 ! "
+        "rtph264pay config-interval=-1 pt=96 aggregate-mode=zero-latency ! "
         "queue ! "
 
         // WebRTC bin
