@@ -201,6 +201,17 @@
             </div>
         </div>
 
+        <script>
+        // Auto-detect WebSocket URL from current page location (for ngrok)
+        (function() {
+            const serverUrlInput = document.getElementById('serverUrl');
+            if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                serverUrlInput.value = protocol + '//' + window.location.host;
+            }
+        })();
+        </script>
+
         <div class="status-panel">
             <div class="status-item">
                 <span class="status-label">Status:</span>
