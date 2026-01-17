@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi WebRTC Stream Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: white;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .subtitle {
+            text-align: center;
+            margin-bottom: 30px;
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .video-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+
+        video {
+            width: 100%;
+            max-width: 1280px;
+            border-radius: 10px;
+            background: black;
+            display: block;
+            margin: 0 auto;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 20px;
+        }
+
+        input {
+            padding: 12px 20px;
+            font-size: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.1);
+            color: white;
+            min-width: 300px;
+        }
+
+        input::placeholder {
+            color: rgba(255,255,255,0.6);
+        }
+
+        button {
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            color: white;
+        }
+
+        .btn-connect {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .btn-disconnect {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-panel {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            font-weight: 600;
+        }
+
+        .status-value {
+            font-family: 'Courier New', monospace;
+        }
+
+        .status-connected {
+            color: #4ade80;
+        }
+
+        .status-disconnected {
+            color: #f87171;
+        }
+
+        .status-connecting {
+            color: #fbbf24;
+        }
+
+        .info-box {
+            background: rgba(59, 130, 246, 0.2);
+            border-left: 4px solid #3b82f6;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+
+        .error-box {
+            background: rgba(239, 68, 68, 0.2);
+            border-left: 4px solid #ef4444;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .pulsing {
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.8em;
+            }
+            
+            button, input {
+                padding: 10px 20px;
+                font-size: 14px;
+                min-width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 Raspberry Pi Live Stream</h1>
+        <div class="subtitle">WebRTC Real-Time Monitoring</div>
+
+        <div class="video-container">
+            <video id="video" autoplay playsinline controls muted></video>
+            
+            <div class="controls">
+                <input type="text" id="streamId" placeholder="Stream ID (e.g., pi-camera-stream)" value="pi-camera-stream">
+                <input type="text" id="serverUrl" placeholder="Signaling Server URL" value="ws://localhost:8080">
+                <button class="btn-connect" id="connectBtn" onclick="connectToStream()">▶️ Connect</button>
+                <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>⏹️ Disconnect</button>
+            </div>
+        </div>
+
+        <div class="status-panel">
+            <div class="status-item">
+                <span class="status-label">Status:</span>
+                <span id="status" class="status-value status-disconnected">Disconnected</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Stream ID:</span>
+                <span id="currentStream" class="status-value">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Connection:</span>
+                <span id="connectionState" class="status-value">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">ICE State:</span>
+                <span id="iceState" class="status-value">-</span>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <strong>ℹ️ Instructions:</strong>
+            <ul style="margin-left: 20px; margin-top: 10px;">
+                <li>Make sure signaling server is running</li>
+                <li>Make sure Raspberry Pi C++ app is running</li>
+                <li>Enter the stream ID (default: pi-camera-stream)</li>
+                <li>Enter signaling server URL (use ngrok URL if remote)</li>
+                <li>Click "Connect" to start viewing</li>
+            </ul>
+        </div>
+
+        <div id="errorBox" class="error-box"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let pc = null;
+        let viewerId = null;
+
+        const video = document.getElementById('video');
+        const statusEl = document.getElementById('status');
+        const currentStreamEl = document.getElementById('currentStream');
+        const connectionStateEl = document.getElementById('connectionState');
+        const iceStateEl = document.getElementById('iceState');
+        const errorBox = document.getElementById('errorBox');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+
+        function updateStatus(status) {
+            statusEl.textContent = status;
+            statusEl.className = 'status-value';
+            
+            if (status === 'Connected') {
+                statusEl.classList.add('status-connected');
+            } else if (status === 'Disconnected') {
+                statusEl.classList.add('status-disconnected');
+            } else {
+                statusEl.classList.add('status-connecting');
+            }
+        }
+
+        function showError(message) {
+            errorBox.textContent = '❌ Error: ' + message;
+            errorBox.style.display = 'block';
+            setTimeout(() => {
+                errorBox.style.display = 'none';
+            }, 5000);
+        }
+
+        async function connectToStream() {
+            try {
+                const streamId = document.getElementById('streamId').value.trim();
+                const serverUrl = document.getElementById('serverUrl').value.trim();
+
+                if (!streamId || !serverUrl) {
+                    showError('Please enter stream ID and server URL');
+                    return;
+                }
+
+                updateStatus('Connecting...');
+                errorBox.style.display = 'none';
+                connectBtn.disabled = true;
+
+                // Connect to signaling server
+                ws = new WebSocket(serverUrl);
+
+                ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    
+                    // Join stream
+                    ws.send(JSON.stringify({
+                        type: 'join',
+                        stream_id: streamId
+                    }));
+                };
+
+                ws.onmessage = async (event) => {
+                    const data = JSON.parse(event.data);
+                    console.log('Received:', data.type, data);
+
+                    switch(data.type) {
+                        case 'joined':
+                            viewerId = data.viewer_id;
+                            currentStreamEl.textContent = data.stream_id;
+                            console.log('Joined as:', viewerId);
+                            break;
+
+                        case 'offer':
+                            await handleOffer(data.sdp);
+                            break;
+
+                        case 'ice-candidate':
+                            await handleIceCandidate(data.candidate, data.sdpMLineIndex);
+                            break;
+
+                        case 'broadcaster-left':
+                            showError('Broadcaster disconnected');
+                            disconnect();
+                            break;
+
+                        case 'error':
+                            showError(data.message);
+                            disconnect();
+                            break;
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    showError('WebSocket connection failed');
+                    disconnect();
+                };
+
+                ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    if (statusEl.textContent !== 'Disconnected') {
+                        updateStatus('Disconnected');
+                    }
+                };
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                showError(error.message);
+                disconnect();
+            }
+        }
+
+        async function handleOffer(sdp) {
+            console.log('Received offer');
+
+            // Create peer connection
+            pc = new RTCPeerConnection({
+                iceServers: [{
+                    urls: 'stun:stun.l.google.com:19302'
+                }]
+            });
+
+            // Handle incoming stream
+            pc.ontrack = (event) => {
+                console.log('Received stream');
+                video.srcObject = event.streams[0];
+                updateStatus('Connected');
+                disconnectBtn.disabled = false;
+            };
+
+            // Handle connection state
+            pc.onconnectionstatechange = () => {
+                console.log('Connection state:', pc.connectionState);
+                connectionStateEl.textContent = pc.connectionState;
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                console.log('ICE state:', pc.iceConnectionState);
+                iceStateEl.textContent = pc.iceConnectionState;
+                
+                if (pc.iceConnectionState === 'failed' || 
+                    pc.iceConnectionState === 'disconnected') {
+                    showError('Connection lost');
+                }
+            };
+
+            // Send ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        to: currentStreamEl.textContent,
+                        candidate: event.candidate.candidate,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                    }));
+                }
+            };
+
+            // Set remote description (offer)
+            await pc.setRemoteDescription({
+                type: 'offer',
+                sdp: sdp
+            });
+
+            // Create answer
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            // Send answer
+            ws.send(JSON.stringify({
+                type: 'answer',
+                to: currentStreamEl.textContent,
+                sdp: answer.sdp
+            }));
+
+            console.log('Answer sent');
+        }
+
+        async function handleIceCandidate(candidate, sdpMLineIndex) {
+            if (pc) {
+                await pc.addIceCandidate({
+                    candidate: candidate,
+                    sdpMLineIndex: sdpMLineIndex
+                });
+            }
+        }
+
+        function disconnect() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            video.srcObject = null;
+            viewerId = null;
+
+            updateStatus('Disconnected');
+            currentStreamEl.textContent = '-';
+            connectionStateEl.textContent = '-';
+            iceStateEl.textContent = '-';
+
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+        }
+
+        // Auto-cleanup on page unload
+        window.addEventListener('beforeunload', disconnect);
+
+        console.log('Viewer loaded and ready');
+    </script>
+</body>
+</html>
