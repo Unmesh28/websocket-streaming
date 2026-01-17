@@ -37,10 +37,9 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
         std::cout << "Using CSI camera (libcamerasrc) - Pi Camera Module" << std::endl;
         video_source =
             "libcamerasrc ! "
-            "capsfilter caps=video/x-raw,width=1280,height=720 ! "
+            "video/x-raw,width=1280,height=720,framerate=30/1,format=NV12 ! "
             "videoconvert ! "
-            "video/x-raw,format=I420 ! "
-            "queue max-size-buffers=1 leaky=downstream ! ";
+            "video/x-raw,format=I420 ! ";
     } else {
         // USB Camera using v4l2
         std::cout << "Using USB camera (v4l2src) - device: " << video_device << std::endl;
@@ -56,13 +55,10 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
         // Video source (CSI or USB)
         video_source +
 
-        // H264 encoding - with keyframes every 30 frames for reliable decoding
-        "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 ! "
-        "video/x-h264,profile=constrained-baseline,level=(string)3.1 ! "
-        "h264parse config-interval=-1 ! "
-        "queue max-size-time=100000000 ! "
-        "rtph264pay config-interval=-1 pt=96 aggregate-mode=zero-latency ! "
-        "queue ! "
+        // H264 encoding - continuous streaming with regular keyframes
+        "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=15 bframes=0 ! "
+        "h264parse config-interval=1 ! "
+        "rtph264pay config-interval=1 pt=96 ! "
 
         // WebRTC bin
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
