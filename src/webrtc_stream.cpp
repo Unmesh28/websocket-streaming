@@ -37,8 +37,9 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
         std::cout << "Using CSI camera (libcamerasrc) - Pi Camera Module" << std::endl;
         video_source =
             "libcamerasrc ! "
-            "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+            "capsfilter caps=video/x-raw,width=1280,height=720 ! "
             "videoconvert ! "
+            "video/x-raw,format=I420 ! "
             "queue max-size-buffers=1 leaky=downstream ! ";
     } else {
         // USB Camera using v4l2
