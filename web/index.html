@@ -375,7 +375,9 @@
                 console.log('Received stream', event.streams[0]);
                 console.log('Track kind:', event.track.kind);
 
-                if (event.streams && event.streams[0]) {
+                // Only set video srcObject for video tracks (not audio)
+                if (event.track.kind === 'video' && event.streams && event.streams[0]) {
+                    console.log('Setting video srcObject');
                     video.srcObject = event.streams[0];
 
                     // Force play (handle autoplay restrictions)
@@ -383,14 +385,20 @@
                         console.log('Video playing');
                     }).catch(err => {
                         console.log('Autoplay blocked, click to play:', err);
-                        // Show play button or unmute hint
                         video.muted = true;
                         video.play();
                     });
-                }
 
-                updateStatus('Connected');
-                disconnectBtn.disabled = false;
+                    updateStatus('Connected');
+                    disconnectBtn.disabled = false;
+                } else if (event.track.kind === 'audio') {
+                    // Add audio track to existing stream or handle separately
+                    console.log('Audio track received');
+                    // If video already has srcObject, add audio track to it
+                    if (video.srcObject) {
+                        video.srcObject.addTrack(event.track);
+                    }
+                }
             };
 
             // Handle connection state
