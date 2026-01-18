@@ -13,217 +13,328 @@ app.use(express.static(path.join(__dirname, '../web')));
 // Store connections
 const broadcasters = new Map(); // streamId -> { ws, viewers: Set }
 const viewers = new Map();       // viewerId -> { ws, streamId, broadcasterId }
+const connections = new Map();   // ws -> { clientId, clientRole }
 
 let nextViewerId = 1;
 
-wss.on('connection', (ws) => {
-    console.log('New WebSocket connection');
-    
-    let clientId = null;
-    let clientRole = null;
-    
+function logStatus() {
+    console.log(`[STATUS] Broadcasters: ${broadcasters.size}, Viewers: ${viewers.size}, Connections: ${connections.size}`);
+}
+
+wss.on('connection', (ws, req) => {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    console.log(`[CONNECT] New WebSocket connection from ${clientIp}`);
+    logStatus();
+
+    // Store connection info
+    connections.set(ws, { clientId: null, clientRole: null });
+
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            console.log('Received:', data.type, data);
-            
+            console.log(`[MESSAGE] Received: ${data.type}`, JSON.stringify(data).substring(0, 200));
+
             switch(data.type) {
                 case 'register':
                     handleRegister(ws, data);
                     break;
-                    
+
                 case 'join':
                     handleJoin(ws, data);
                     break;
-                    
+
                 case 'offer':
-                    handleOffer(data);
+                    handleOffer(ws, data);
                     break;
-                    
+
                 case 'answer':
-                    handleAnswer(data);
+                    handleAnswer(ws, data);
                     break;
-                    
+
                 case 'ice-candidate':
-                    handleIceCandidate(data);
+                    handleIceCandidate(ws, data);
                     break;
-                    
+
                 default:
-                    console.log('Unknown message type:', data.type);
+                    console.log(`[WARN] Unknown message type: ${data.type}`);
             }
         } catch (error) {
-            console.error('Error processing message:', error);
+            console.error(`[ERROR] Error processing message:`, error);
         }
     });
-    
-    ws.on('close', () => {
-        console.log('WebSocket connection closed');
+
+    ws.on('close', (code, reason) => {
+        console.log(`[CLOSE] WebSocket closed - code: ${code}, reason: ${reason}`);
         handleDisconnect(ws);
     });
-    
+
     ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+        console.error(`[ERROR] WebSocket error:`, error);
     });
-    
-    function handleRegister(ws, data) {
-        if (data.role === 'broadcaster') {
-            const streamId = data.stream_id;
-            clientId = streamId;
-            clientRole = 'broadcaster';
-            
-            broadcasters.set(streamId, {
-                ws: ws,
-                viewers: new Set()
-            });
-            
-            console.log(`Broadcaster registered: ${streamId}`);
-            
-            ws.send(JSON.stringify({
-                type: 'registered',
-                stream_id: streamId
-            }));
+
+    // Ping/pong to keep connection alive
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+});
+
+// Keep-alive ping every 30 seconds
+const pingInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[PING] Terminating dead connection');
+            return ws.terminate();
         }
-    }
-    
-    function handleJoin(ws, data) {
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wss.on('close', () => {
+    clearInterval(pingInterval);
+});
+
+function handleRegister(ws, data) {
+    if (data.role === 'broadcaster') {
         const streamId = data.stream_id;
-        const viewerId = 'viewer-' + nextViewerId++;
-        
-        clientId = viewerId;
-        clientRole = 'viewer';
-        
-        const broadcaster = broadcasters.get(streamId);
-        
-        if (!broadcaster) {
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Stream not found'
-            }));
-            return;
+
+        // Update connection info
+        const connInfo = connections.get(ws);
+        if (connInfo) {
+            connInfo.clientId = streamId;
+            connInfo.clientRole = 'broadcaster';
         }
-        
-        // Add viewer
-        broadcaster.viewers.add(viewerId);
-        viewers.set(viewerId, {
+
+        // Check if broadcaster already exists
+        if (broadcasters.has(streamId)) {
+            console.log(`[REGISTER] Replacing existing broadcaster for stream: ${streamId}`);
+            const old = broadcasters.get(streamId);
+            if (old.ws !== ws) {
+                // Close old broadcaster connection
+                old.ws.close();
+            }
+        }
+
+        broadcasters.set(streamId, {
             ws: ws,
-            streamId: streamId,
-            broadcasterId: streamId
+            viewers: new Set()
         });
-        
-        console.log(`Viewer ${viewerId} joined stream: ${streamId}`);
-        
-        // Notify broadcaster
+
+        console.log(`[REGISTER] Broadcaster registered: ${streamId}`);
+        logStatus();
+
+        ws.send(JSON.stringify({
+            type: 'registered',
+            stream_id: streamId
+        }));
+    }
+}
+
+function handleJoin(ws, data) {
+    const streamId = data.stream_id;
+    const viewerId = 'viewer-' + nextViewerId++;
+
+    // Update connection info
+    const connInfo = connections.get(ws);
+    if (connInfo) {
+        connInfo.clientId = viewerId;
+        connInfo.clientRole = 'viewer';
+    }
+
+    const broadcaster = broadcasters.get(streamId);
+
+    if (!broadcaster) {
+        console.log(`[JOIN] Stream not found: ${streamId}`);
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Stream not found: ' + streamId
+        }));
+        return;
+    }
+
+    // Check if broadcaster WebSocket is still open
+    if (broadcaster.ws.readyState !== WebSocket.OPEN) {
+        console.log(`[JOIN] Broadcaster WebSocket not open for stream: ${streamId}`);
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Broadcaster not available'
+        }));
+        return;
+    }
+
+    // Add viewer
+    broadcaster.viewers.add(viewerId);
+    viewers.set(viewerId, {
+        ws: ws,
+        streamId: streamId,
+        broadcasterId: streamId
+    });
+
+    console.log(`[JOIN] Viewer ${viewerId} joined stream: ${streamId} (total viewers: ${broadcaster.viewers.size})`);
+    logStatus();
+
+    // Notify broadcaster
+    try {
         broadcaster.ws.send(JSON.stringify({
             type: 'viewer-joined',
             viewer_id: viewerId
         }));
-        
-        // Confirm to viewer
-        ws.send(JSON.stringify({
-            type: 'joined',
-            viewer_id: viewerId,
-            stream_id: streamId
-        }));
+        console.log(`[JOIN] Notified broadcaster about ${viewerId}`);
+    } catch (e) {
+        console.error(`[JOIN] Failed to notify broadcaster:`, e);
     }
-    
-    function handleOffer(data) {
-        const viewerId = data.to;
-        const viewer = viewers.get(viewerId);
-        
-        if (viewer) {
-            console.log(`Forwarding offer to ${viewerId}`);
+
+    // Confirm to viewer
+    ws.send(JSON.stringify({
+        type: 'joined',
+        viewer_id: viewerId,
+        stream_id: streamId
+    }));
+}
+
+function handleOffer(ws, data) {
+    const viewerId = data.to;
+    const viewer = viewers.get(viewerId);
+
+    if (viewer) {
+        console.log(`[OFFER] Forwarding offer to ${viewerId}`);
+        try {
             viewer.ws.send(JSON.stringify({
                 type: 'offer',
                 from: viewer.broadcasterId,
                 sdp: data.sdp
             }));
+        } catch (e) {
+            console.error(`[OFFER] Failed to forward:`, e);
         }
+    } else {
+        console.log(`[OFFER] Viewer not found: ${viewerId}`);
     }
-    
-    function handleAnswer(data) {
-        const broadcasterId = data.to;
-        const broadcaster = broadcasters.get(broadcasterId);
-        
-        if (broadcaster) {
-            console.log(`Forwarding answer to broadcaster`);
+}
+
+function handleAnswer(ws, data) {
+    const broadcasterId = data.to;
+    const broadcaster = broadcasters.get(broadcasterId);
+
+    // Get the viewer's ID from connection info
+    const connInfo = connections.get(ws);
+    const viewerId = connInfo ? connInfo.clientId : 'unknown';
+
+    if (broadcaster) {
+        console.log(`[ANSWER] Forwarding answer from ${viewerId} to broadcaster`);
+        try {
             broadcaster.ws.send(JSON.stringify({
                 type: 'answer',
-                from: clientId,
+                from: viewerId,
                 sdp: data.sdp
             }));
+        } catch (e) {
+            console.error(`[ANSWER] Failed to forward:`, e);
         }
+    } else {
+        console.log(`[ANSWER] Broadcaster not found: ${broadcasterId}`);
     }
-    
-    function handleIceCandidate(data) {
-        const peerId = data.to;
-        
-        // Check if peer is broadcaster
-        const broadcaster = broadcasters.get(peerId);
-        if (broadcaster) {
+}
+
+function handleIceCandidate(ws, data) {
+    const peerId = data.to;
+    const connInfo = connections.get(ws);
+    const fromId = connInfo ? connInfo.clientId : 'unknown';
+
+    // Check if peer is broadcaster
+    const broadcaster = broadcasters.get(peerId);
+    if (broadcaster) {
+        try {
             broadcaster.ws.send(JSON.stringify({
                 type: 'ice-candidate',
-                from: clientId,
+                from: fromId,
                 candidate: data.candidate,
                 sdpMLineIndex: data.sdpMLineIndex
             }));
-            return;
+        } catch (e) {
+            console.error(`[ICE] Failed to forward to broadcaster:`, e);
         }
-        
-        // Check if peer is viewer
-        const viewer = viewers.get(peerId);
-        if (viewer) {
+        return;
+    }
+
+    // Check if peer is viewer
+    const viewer = viewers.get(peerId);
+    if (viewer) {
+        try {
             viewer.ws.send(JSON.stringify({
                 type: 'ice-candidate',
-                from: clientId,
+                from: fromId,
                 candidate: data.candidate,
                 sdpMLineIndex: data.sdpMLineIndex
             }));
+        } catch (e) {
+            console.error(`[ICE] Failed to forward to viewer:`, e);
         }
     }
-    
-    function handleDisconnect(ws) {
-        if (clientRole === 'broadcaster' && clientId) {
-            const broadcaster = broadcasters.get(clientId);
-            if (broadcaster) {
-                // Notify all viewers
-                broadcaster.viewers.forEach(viewerId => {
-                    const viewer = viewers.get(viewerId);
-                    if (viewer) {
+}
+
+function handleDisconnect(ws) {
+    const connInfo = connections.get(ws);
+
+    if (!connInfo) {
+        console.log('[DISCONNECT] Unknown connection');
+        connections.delete(ws);
+        return;
+    }
+
+    const { clientId, clientRole } = connInfo;
+
+    if (clientRole === 'broadcaster' && clientId) {
+        const broadcaster = broadcasters.get(clientId);
+        if (broadcaster && broadcaster.ws === ws) {
+            // Notify all viewers
+            console.log(`[DISCONNECT] Broadcaster disconnected: ${clientId}, notifying ${broadcaster.viewers.size} viewers`);
+            broadcaster.viewers.forEach(viewerId => {
+                const viewer = viewers.get(viewerId);
+                if (viewer) {
+                    try {
                         viewer.ws.send(JSON.stringify({
                             type: 'broadcaster-left'
                         }));
-                        viewers.delete(viewerId);
+                    } catch (e) {
+                        // Ignore send errors during disconnect
                     }
-                });
-                
-                broadcasters.delete(clientId);
-                console.log(`Broadcaster disconnected: ${clientId}`);
-            }
-        } else if (clientRole === 'viewer' && clientId) {
-            const viewer = viewers.get(clientId);
-            if (viewer) {
-                // Notify broadcaster
-                const broadcaster = broadcasters.get(viewer.broadcasterId);
-                if (broadcaster) {
-                    broadcaster.viewers.delete(clientId);
+                    viewers.delete(viewerId);
+                }
+            });
+
+            broadcasters.delete(clientId);
+        }
+    } else if (clientRole === 'viewer' && clientId) {
+        const viewer = viewers.get(clientId);
+        if (viewer) {
+            // Notify broadcaster
+            const broadcaster = broadcasters.get(viewer.broadcasterId);
+            if (broadcaster) {
+                broadcaster.viewers.delete(clientId);
+                try {
                     broadcaster.ws.send(JSON.stringify({
                         type: 'viewer-left',
                         viewer_id: clientId
                     }));
+                } catch (e) {
+                    // Ignore send errors during disconnect
                 }
-                
-                viewers.delete(clientId);
-                console.log(`Viewer disconnected: ${clientId}`);
+                console.log(`[DISCONNECT] Viewer disconnected: ${clientId}, remaining viewers: ${broadcaster.viewers.size}`);
             }
+
+            viewers.delete(clientId);
         }
     }
-});
+
+    connections.delete(ws);
+    logStatus();
+}
 
 const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, () => {
     console.log('\n========================================');
-    console.log('  WebRTC Signaling Server');
+    console.log('  WebRTC Signaling Server (Enhanced)');
     console.log('========================================');
     console.log(`HTTP server: http://localhost:${PORT}`);
     console.log(`WebSocket:   ws://localhost:${PORT}`);
@@ -233,11 +344,19 @@ server.listen(PORT, () => {
 
 // Status endpoint
 app.get('/status', (req, res) => {
-    res.json({
+    const status = {
         broadcasters: Array.from(broadcasters.keys()),
-        viewers: viewers.size,
+        viewerCount: viewers.size,
+        connectionCount: connections.size,
         uptime: process.uptime()
-    });
+    };
+    console.log('[STATUS] API request:', status);
+    res.json(status);
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 console.log('Starting signaling server...');
