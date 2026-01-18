@@ -276,7 +276,9 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , video_queue_(nullptr)
     , audio_queue_(nullptr)
     , video_tee_pad_(nullptr)
-    , audio_tee_pad_(nullptr) {
+    , audio_tee_pad_(nullptr)
+    , webrtc_video_sink_(nullptr)
+    , webrtc_audio_sink_(nullptr) {
     LOG_VAR("PEER", "WebRTCPeer created: ", viewer_id);
 }
 
@@ -322,6 +324,11 @@ bool WebRTCPeer::initialize() {
     // Add elements to pipeline
     gst_bin_add_many(GST_BIN(pipeline_), video_queue_, audio_queue_, webrtcbin_, nullptr);
 
+    // Sync state BEFORE linking (elements must be in at least PAUSED state)
+    gst_element_sync_state_with_parent(video_queue_);
+    gst_element_sync_state_with_parent(audio_queue_);
+    gst_element_sync_state_with_parent(webrtcbin_);
+
     // Get request pads from tees
     video_tee_pad_ = gst_element_request_pad_simple(video_tee_, "src_%u");
     audio_tee_pad_ = gst_element_request_pad_simple(audio_tee_, "src_%u");
@@ -331,38 +338,62 @@ bool WebRTCPeer::initialize() {
         return false;
     }
 
-    // Link: video_tee -> video_queue -> webrtcbin
+    LOG("PEER", "Got tee pads - video: " << GST_PAD_NAME(video_tee_pad_)
+        << ", audio: " << GST_PAD_NAME(audio_tee_pad_));
+
+    // Link: video_tee -> video_queue
     GstPad* vqueue_sink = gst_element_get_static_pad(video_queue_, "sink");
-    if (gst_pad_link(video_tee_pad_, vqueue_sink) != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link video tee to queue");
+    GstPadLinkReturn vlink_result = gst_pad_link(video_tee_pad_, vqueue_sink);
+    if (vlink_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link video tee to queue, result: " << vlink_result);
         gst_object_unref(vqueue_sink);
         return false;
     }
     gst_object_unref(vqueue_sink);
+    LOG("PEER", "Linked video_tee -> video_queue");
 
-    if (!gst_element_link(video_queue_, webrtcbin_)) {
-        LOG("PEER-ERROR", "Failed to link video queue to webrtcbin");
-        return false;
-    }
-
-    // Link: audio_tee -> audio_queue -> webrtcbin
+    // Link: audio_tee -> audio_queue
     GstPad* aqueue_sink = gst_element_get_static_pad(audio_queue_, "sink");
-    if (gst_pad_link(audio_tee_pad_, aqueue_sink) != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link audio tee to queue");
+    GstPadLinkReturn alink_result = gst_pad_link(audio_tee_pad_, aqueue_sink);
+    if (alink_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link audio tee to queue, result: " << alink_result);
         gst_object_unref(aqueue_sink);
         return false;
     }
     gst_object_unref(aqueue_sink);
+    LOG("PEER", "Linked audio_tee -> audio_queue");
 
-    if (!gst_element_link(audio_queue_, webrtcbin_)) {
-        LOG("PEER-ERROR", "Failed to link audio queue to webrtcbin");
+    // Request sink pads from webrtcbin (webrtcbin uses request pads, not static pads)
+    webrtc_video_sink_ = gst_element_request_pad_simple(webrtcbin_, "sink_%u");
+    webrtc_audio_sink_ = gst_element_request_pad_simple(webrtcbin_, "sink_%u");
+
+    if (!webrtc_video_sink_ || !webrtc_audio_sink_) {
+        LOG("PEER-ERROR", "Failed to get webrtcbin sink pads");
         return false;
     }
 
-    // Sync state with pipeline
-    gst_element_sync_state_with_parent(video_queue_);
-    gst_element_sync_state_with_parent(audio_queue_);
-    gst_element_sync_state_with_parent(webrtcbin_);
+    LOG("PEER", "Got webrtcbin sink pads - video: " << GST_PAD_NAME(webrtc_video_sink_)
+        << ", audio: " << GST_PAD_NAME(webrtc_audio_sink_));
+
+    // Link: video_queue -> webrtcbin
+    GstPad* vqueue_src = gst_element_get_static_pad(video_queue_, "src");
+    GstPadLinkReturn vwebrtc_result = gst_pad_link(vqueue_src, webrtc_video_sink_);
+    gst_object_unref(vqueue_src);
+    if (vwebrtc_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link video queue to webrtcbin, result: " << vwebrtc_result);
+        return false;
+    }
+    LOG("PEER", "Linked video_queue -> webrtcbin");
+
+    // Link: audio_queue -> webrtcbin
+    GstPad* aqueue_src = gst_element_get_static_pad(audio_queue_, "src");
+    GstPadLinkReturn awebrtc_result = gst_pad_link(aqueue_src, webrtc_audio_sink_);
+    gst_object_unref(aqueue_src);
+    if (awebrtc_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link audio queue to webrtcbin, result: " << awebrtc_result);
+        return false;
+    }
+    LOG("PEER", "Linked audio_queue -> webrtcbin");
 
     // Connect signals
     g_signal_connect(webrtcbin_, "on-negotiation-needed",
@@ -400,6 +431,18 @@ void WebRTCPeer::cleanup() {
         gst_element_release_request_pad(audio_tee_, audio_tee_pad_);
         gst_object_unref(audio_tee_pad_);
         audio_tee_pad_ = nullptr;
+    }
+
+    // Release webrtcbin sink pads
+    if (webrtc_video_sink_ && webrtcbin_) {
+        gst_element_release_request_pad(webrtcbin_, webrtc_video_sink_);
+        gst_object_unref(webrtc_video_sink_);
+        webrtc_video_sink_ = nullptr;
+    }
+    if (webrtc_audio_sink_ && webrtcbin_) {
+        gst_element_release_request_pad(webrtcbin_, webrtc_audio_sink_);
+        gst_object_unref(webrtc_audio_sink_);
+        webrtc_audio_sink_ = nullptr;
     }
 
     // Remove elements from pipeline
