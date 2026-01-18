@@ -34,7 +34,7 @@ link_directories(
 # Source files
 set(SOURCES
     src/main.cpp
-    src/webrtc_stream.cpp
+    src/shared_media_pipeline.cpp
     src/signaling_client.cpp
 )
 
