@@ -248,6 +248,49 @@
     </div>
 
     <script>
+        // ==================== DEBUG LOGGING ====================
+        const DEBUG = true;
+        function log(category, message, data = null) {
+            if (!DEBUG) return;
+            const timestamp = new Date().toISOString().substr(11, 12);
+            const prefix = `[${timestamp}] [${category}]`;
+            if (data) {
+                console.log(prefix, message, data);
+            } else {
+                console.log(prefix, message);
+            }
+        }
+
+        function logVideoState() {
+            const v = document.getElementById('video');
+            log('VIDEO-STATE', `Dimensions: ${v.videoWidth}x${v.videoHeight}, ` +
+                `readyState: ${v.readyState}, paused: ${v.paused}, ` +
+                `currentTime: ${v.currentTime.toFixed(2)}, ` +
+                `networkState: ${v.networkState}, ended: ${v.ended}`);
+            if (v.srcObject) {
+                const tracks = v.srcObject.getTracks();
+                log('VIDEO-STATE', `srcObject tracks: ${tracks.length}`);
+                tracks.forEach((t, i) => {
+                    log('VIDEO-STATE', `  Track ${i}: kind=${t.kind}, enabled=${t.enabled}, ` +
+                        `muted=${t.muted}, readyState=${t.readyState}, id=${t.id}`);
+                    if (t.getSettings) {
+                        const settings = t.getSettings();
+                        log('VIDEO-STATE', `  Settings:`, settings);
+                    }
+                });
+            } else {
+                log('VIDEO-STATE', 'srcObject is NULL');
+            }
+        }
+
+        // Log video state every 3 seconds when connected
+        setInterval(() => {
+            if (pc && pc.connectionState === 'connected') {
+                logVideoState();
+            }
+        }, 3000);
+        // ==================== END DEBUG LOGGING ====================
+
         let ws = null;
         let pc = null;
         let viewerId = null;
@@ -261,10 +304,32 @@
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
 
+        // Add video element event listeners for debugging
+        video.addEventListener('loadstart', () => log('VIDEO-EVENT', 'loadstart'));
+        video.addEventListener('loadedmetadata', () => {
+            log('VIDEO-EVENT', `loadedmetadata - dimensions: ${video.videoWidth}x${video.videoHeight}`);
+        });
+        video.addEventListener('loadeddata', () => log('VIDEO-EVENT', 'loadeddata'));
+        video.addEventListener('canplay', () => log('VIDEO-EVENT', 'canplay'));
+        video.addEventListener('canplaythrough', () => log('VIDEO-EVENT', 'canplaythrough'));
+        video.addEventListener('play', () => log('VIDEO-EVENT', 'play'));
+        video.addEventListener('playing', () => log('VIDEO-EVENT', 'playing'));
+        video.addEventListener('pause', () => log('VIDEO-EVENT', 'pause'));
+        video.addEventListener('waiting', () => log('VIDEO-EVENT', 'waiting'));
+        video.addEventListener('stalled', () => log('VIDEO-EVENT', 'stalled'));
+        video.addEventListener('suspend', () => log('VIDEO-EVENT', 'suspend'));
+        video.addEventListener('error', (e) => log('VIDEO-EVENT', 'ERROR', video.error));
+        video.addEventListener('emptied', () => log('VIDEO-EVENT', 'emptied'));
+        video.addEventListener('ended', () => log('VIDEO-EVENT', 'ended'));
+        video.addEventListener('resize', () => {
+            log('VIDEO-EVENT', `resize - new dimensions: ${video.videoWidth}x${video.videoHeight}`);
+        });
+
         function updateStatus(status) {
+            log('STATUS', `Status changed to: ${status}`);
             statusEl.textContent = status;
             statusEl.className = 'status-value';
-            
+
             if (status === 'Connected') {
                 statusEl.classList.add('status-connected');
             } else if (status === 'Disconnected') {
@@ -275,6 +340,7 @@
         }
 
         function showError(message) {
+            log('ERROR', message);
             errorBox.textContent = '❌ Error: ' + message;
             errorBox.style.display = 'block';
             setTimeout(() => {
@@ -286,6 +352,8 @@
             try {
                 const streamId = document.getElementById('streamId').value.trim();
                 const serverUrl = document.getElementById('serverUrl').value.trim();
+
+                log('CONNECT', `Connecting to ${serverUrl} for stream ${streamId}`);
 
                 if (!streamId || !serverUrl) {
                     showError('Please enter stream ID and server URL');
@@ -300,40 +368,43 @@
                 ws = new WebSocket(serverUrl);
 
                 ws.onopen = () => {
-                    console.log('WebSocket connected');
-                    
+                    log('WEBSOCKET', 'Connected to signaling server');
+
                     // Join stream
-                    ws.send(JSON.stringify({
-                        type: 'join',
-                        stream_id: streamId
-                    }));
+                    const joinMsg = { type: 'join', stream_id: streamId };
+                    log('WEBSOCKET', 'Sending join message', joinMsg);
+                    ws.send(JSON.stringify(joinMsg));
                 };
 
                 ws.onmessage = async (event) => {
                     const data = JSON.parse(event.data);
-                    console.log('Received:', data.type, data);
+                    log('WEBSOCKET', `Received message type: ${data.type}`, data);
 
                     switch(data.type) {
                         case 'joined':
                             viewerId = data.viewer_id;
                             currentStreamEl.textContent = data.stream_id;
-                            console.log('Joined as:', viewerId);
+                            log('WEBSOCKET', `Joined as viewer: ${viewerId}`);
                             break;
 
                         case 'offer':
+                            log('WEBRTC', 'Received SDP offer, length:', data.sdp.length);
                             await handleOffer(data.sdp);
                             break;
 
                         case 'ice-candidate':
+                            log('WEBRTC', `Received ICE candidate: ${data.candidate.substring(0, 50)}...`);
                             await handleIceCandidate(data.candidate, data.sdpMLineIndex);
                             break;
 
                         case 'broadcaster-left':
+                            log('WEBSOCKET', 'Broadcaster disconnected');
                             showError('Broadcaster disconnected');
                             disconnect();
                             break;
 
                         case 'error':
+                            log('WEBSOCKET', 'Error from server', data.message);
                             showError(data.message);
                             disconnect();
                             break;
@@ -341,27 +412,27 @@
                 };
 
                 ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
+                    log('WEBSOCKET', 'Error', error);
                     showError('WebSocket connection failed');
                     disconnect();
                 };
 
-                ws.onclose = () => {
-                    console.log('WebSocket disconnected');
+                ws.onclose = (event) => {
+                    log('WEBSOCKET', `Closed - code: ${event.code}, reason: ${event.reason}`);
                     if (statusEl.textContent !== 'Disconnected') {
                         updateStatus('Disconnected');
                     }
                 };
 
             } catch (error) {
-                console.error('Connection error:', error);
+                log('ERROR', 'Connection error', error);
                 showError(error.message);
                 disconnect();
             }
         }
 
         async function handleOffer(sdp) {
-            console.log('Received offer');
+            log('WEBRTC', 'Creating RTCPeerConnection');
 
             // Create peer connection
             pc = new RTCPeerConnection({
@@ -372,93 +443,142 @@
 
             // Handle incoming stream
             pc.ontrack = (event) => {
-                console.log('Received stream', event.streams[0]);
-                console.log('Track kind:', event.track.kind);
+                log('WEBRTC', `ontrack event - kind: ${event.track.kind}, ` +
+                    `streams: ${event.streams.length}, track.id: ${event.track.id}`);
+
+                if (event.streams[0]) {
+                    log('WEBRTC', `Stream ID: ${event.streams[0].id}, ` +
+                        `tracks in stream: ${event.streams[0].getTracks().length}`);
+                }
 
                 // Only set video srcObject for video tracks (not audio)
                 if (event.track.kind === 'video' && event.streams && event.streams[0]) {
-                    console.log('Setting video srcObject');
+                    log('WEBRTC', 'Setting video.srcObject with video stream');
                     video.srcObject = event.streams[0];
 
+                    // Log track settings
+                    if (event.track.getSettings) {
+                        log('WEBRTC', 'Video track settings:', event.track.getSettings());
+                    }
+
                     // Force play (handle autoplay restrictions)
+                    log('VIDEO', 'Attempting to play video');
                     video.play().then(() => {
-                        console.log('Video playing');
+                        log('VIDEO', 'play() succeeded');
+                        logVideoState();
                     }).catch(err => {
-                        console.log('Autoplay blocked, click to play:', err);
+                        log('VIDEO', 'play() failed, retrying muted', err.message);
                         video.muted = true;
-                        video.play();
+                        video.play().then(() => {
+                            log('VIDEO', 'Muted play() succeeded');
+                        }).catch(err2 => {
+                            log('VIDEO', 'Muted play() also failed', err2.message);
+                        });
                     });
 
                     updateStatus('Connected');
                     disconnectBtn.disabled = false;
                 } else if (event.track.kind === 'audio') {
-                    // Add audio track to existing stream or handle separately
-                    console.log('Audio track received');
+                    log('WEBRTC', 'Audio track received');
                     // If video already has srcObject, add audio track to it
                     if (video.srcObject) {
-                        video.srcObject.addTrack(event.track);
+                        log('WEBRTC', 'Adding audio track to existing srcObject');
+                        try {
+                            video.srcObject.addTrack(event.track);
+                            log('WEBRTC', 'Audio track added successfully');
+                        } catch (e) {
+                            log('WEBRTC', 'Failed to add audio track', e.message);
+                        }
+                    } else {
+                        log('WEBRTC', 'No video srcObject yet, audio track not added');
                     }
                 }
             };
 
             // Handle connection state
             pc.onconnectionstatechange = () => {
-                console.log('Connection state:', pc.connectionState);
+                log('WEBRTC', `Connection state: ${pc.connectionState}`);
                 connectionStateEl.textContent = pc.connectionState;
+                if (pc.connectionState === 'connected') {
+                    logVideoState();
+                }
             };
 
             pc.oniceconnectionstatechange = () => {
-                console.log('ICE state:', pc.iceConnectionState);
+                log('WEBRTC', `ICE state: ${pc.iceConnectionState}`);
                 iceStateEl.textContent = pc.iceConnectionState;
-                
-                if (pc.iceConnectionState === 'failed' || 
+
+                if (pc.iceConnectionState === 'failed' ||
                     pc.iceConnectionState === 'disconnected') {
                     showError('Connection lost');
                 }
             };
 
+            pc.onicegatheringstatechange = () => {
+                log('WEBRTC', `ICE gathering state: ${pc.iceGatheringState}`);
+            };
+
+            pc.onsignalingstatechange = () => {
+                log('WEBRTC', `Signaling state: ${pc.signalingState}`);
+            };
+
             // Send ICE candidates
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
+                    log('WEBRTC', `Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`);
                     ws.send(JSON.stringify({
                         type: 'ice-candidate',
                         to: currentStreamEl.textContent,
                         candidate: event.candidate.candidate,
                         sdpMLineIndex: event.candidate.sdpMLineIndex
                     }));
+                } else {
+                    log('WEBRTC', 'ICE gathering complete');
                 }
             };
 
             // Set remote description (offer)
+            log('WEBRTC', 'Setting remote description (offer)');
             await pc.setRemoteDescription({
                 type: 'offer',
                 sdp: sdp
             });
+            log('WEBRTC', 'Remote description set');
 
             // Create answer
+            log('WEBRTC', 'Creating answer');
             const answer = await pc.createAnswer();
+            log('WEBRTC', 'Answer created, setting local description');
             await pc.setLocalDescription(answer);
+            log('WEBRTC', 'Local description set');
 
             // Send answer
+            log('WEBRTC', 'Sending answer to broadcaster');
             ws.send(JSON.stringify({
                 type: 'answer',
                 to: currentStreamEl.textContent,
                 sdp: answer.sdp
             }));
-
-            console.log('Answer sent');
+            log('WEBRTC', 'Answer sent');
         }
 
         async function handleIceCandidate(candidate, sdpMLineIndex) {
             if (pc) {
-                await pc.addIceCandidate({
-                    candidate: candidate,
-                    sdpMLineIndex: sdpMLineIndex
-                });
+                log('WEBRTC', `Adding remote ICE candidate, mlineindex: ${sdpMLineIndex}`);
+                try {
+                    await pc.addIceCandidate({
+                        candidate: candidate,
+                        sdpMLineIndex: sdpMLineIndex
+                    });
+                    log('WEBRTC', 'ICE candidate added successfully');
+                } catch (e) {
+                    log('WEBRTC', 'Failed to add ICE candidate', e.message);
+                }
             }
         }
 
         function disconnect() {
+            log('DISCONNECT', 'Disconnecting...');
             if (pc) {
                 pc.close();
                 pc = null;
@@ -479,12 +599,14 @@
 
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
+            log('DISCONNECT', 'Disconnected');
         }
 
         // Auto-cleanup on page unload
         window.addEventListener('beforeunload', disconnect);
 
-        console.log('Viewer loaded and ready');
+        log('INIT', 'Viewer loaded and ready');
+        log('INIT', 'User Agent: ' + navigator.userAgent);
     </script>
 </body>
 </html>

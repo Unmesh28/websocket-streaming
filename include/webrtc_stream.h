@@ -50,6 +50,9 @@ public:
     // Check if streaming
     bool isStreaming() const { return is_streaming_; }
 
+    // Get pipeline (for debugging/monitoring)
+    GstElement* getPipeline() const { return pipeline_; }
+
 private:
     std::string stream_id_;
     GstElement* pipeline_;
