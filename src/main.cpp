@@ -166,6 +166,11 @@ private:
         auto it = viewer_peers_.find(viewer_id);
         if (it != viewer_peers_.end()) {
             it->second->setRemoteAnswer(sdp);
+
+            // Force a keyframe so the new viewer can start decoding
+            std::cout << "    Forcing keyframe for new viewer..." << std::endl;
+            shared_pipeline_.forceKeyframe();
+
             std::cout << "[OK] Connection established with: " << viewer_id << "\n" << std::endl;
         }
     }

@@ -44,10 +44,14 @@ public:
     // Check if running
     bool isRunning() const { return is_running_; }
 
+    // Force a keyframe (called when new viewer joins)
+    void forceKeyframe();
+
 private:
     GstElement* pipeline_;
     GstElement* video_tee_;
     GstElement* audio_tee_;
+    GstElement* video_encoder_;
     bool is_running_;
     std::mutex mutex_;
 
