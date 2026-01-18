@@ -234,33 +234,44 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
 }
 
 void SharedMediaPipeline::forceKeyframe() {
-    // FIXED: Send upstream event to DOWNSTREAM element's sink pad (video_tee's sink)
-    // The event will propagate upstream to the encoder
-    if (!video_tee_) {
-        LOG("SHARED", "Cannot force keyframe - no tee reference");
+    // Method 1: Send force-key-unit event directly to the encoder element
+    // gst_element_send_event() handles event direction properly
+    if (!video_encoder_) {
+        LOG("SHARED", "Cannot force keyframe - no encoder reference");
         return;
     }
 
-    LOG("SHARED", "Forcing keyframe via tee sink pad...");
+    LOG("SHARED", "Forcing keyframe via encoder element...");
 
-    // Send upstream force-key-unit event to the tee's sink pad
-    // This will propagate upstream through rtph264pay -> h264parse -> x264enc
-    GstPad* tee_sink = gst_element_get_static_pad(video_tee_, "sink");
-    if (tee_sink) {
-        GstEvent* event = gst_video_event_new_upstream_force_key_unit(
-            GST_CLOCK_TIME_NONE,  // running_time
-            TRUE,                  // all_headers - include SPS/PPS
-            0                      // count
-        );
-        gboolean result = gst_pad_send_event(tee_sink, event);
-        if (result) {
-            LOG("SHARED", "Keyframe request sent successfully");
-        } else {
-            LOG("SHARED-WARN", "Failed to send keyframe request");
-        }
-        gst_object_unref(tee_sink);
+    // Create upstream force-key-unit event
+    GstEvent* event = gst_video_event_new_upstream_force_key_unit(
+        GST_CLOCK_TIME_NONE,  // running_time
+        TRUE,                  // all_headers - include SPS/PPS
+        0                      // count
+    );
+
+    // Send event to encoder - gst_element_send_event handles direction
+    gboolean result = gst_element_send_event(video_encoder_, event);
+    if (result) {
+        LOG("SHARED", "Keyframe request sent successfully to encoder");
     } else {
-        LOG("SHARED-ERROR", "Could not get tee sink pad");
+        LOG("SHARED-WARN", "Encoder rejected keyframe request, trying property method...");
+
+        // Method 2: Fallback - set key-int-max to 1 briefly to force immediate keyframe
+        // Then restore it back
+        guint current_key_int;
+        g_object_get(video_encoder_, "key-int-max", &current_key_int, nullptr);
+        g_object_set(video_encoder_, "key-int-max", 1, nullptr);
+
+        // Schedule restoration after a short delay (next frame)
+        g_timeout_add(100, [](gpointer data) -> gboolean {
+            GstElement* encoder = (GstElement*)data;
+            g_object_set(encoder, "key-int-max", 30, nullptr);
+            LOG("SHARED", "Restored key-int-max to 30");
+            return FALSE;  // Don't repeat
+        }, video_encoder_);
+
+        LOG("SHARED", "Forced keyframe via key-int-max property");
     }
 }
 
