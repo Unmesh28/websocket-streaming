@@ -6,6 +6,8 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <map>
+#include <cstring>
 
 // ==================== DEBUG LOGGING ====================
 #define DEBUG_LOGGING 1
@@ -363,12 +365,35 @@ void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
 
 // ==================== WebRTCPeer Implementation ====================
 
+// Probe to track buffers at tee src pad (per-viewer)
+static GstPadProbeReturn tee_src_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    const char* viewer_id = (const char*)user_data;
+    static std::map<std::string, guint64> tee_src_counts;
+    tee_src_counts[viewer_id]++;
+    if (tee_src_counts[viewer_id] % 100 == 0) {
+        LOG("PROBE", "Buffers at tee src for " << viewer_id << ": " << tee_src_counts[viewer_id]);
+    }
+    return GST_PAD_PROBE_OK;
+}
+
+// Probe to track buffers entering queue
+static GstPadProbeReturn queue_sink_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    const char* viewer_id = (const char*)user_data;
+    static std::map<std::string, guint64> queue_sink_counts;
+    queue_sink_counts[viewer_id]++;
+    if (queue_sink_counts[viewer_id] % 100 == 0) {
+        LOG("PROBE", "Buffers entering queue for " << viewer_id << ": " << queue_sink_counts[viewer_id]);
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 // Buffer probe to count buffers reaching webrtcbin
 static GstPadProbeReturn webrtc_buffer_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
-    static guint64 webrtc_buffer_count = 0;
-    webrtc_buffer_count++;
-    if (webrtc_buffer_count % 100 == 0) {
-        LOG("PROBE", "Buffers reaching webrtcbin: " << webrtc_buffer_count);
+    const char* viewer_id = (const char*)user_data;
+    static std::map<std::string, guint64> webrtc_counts;
+    webrtc_counts[viewer_id]++;
+    if (webrtc_counts[viewer_id] % 100 == 0) {
+        LOG("PROBE", "Buffers reaching webrtcbin for " << viewer_id << ": " << webrtc_counts[viewer_id]);
     }
     return GST_PAD_PROBE_OK;
 }
@@ -470,10 +495,79 @@ bool WebRTCPeer::initialize() {
     LOG("PEER", "Got webrtcbin sink pads - video: " << GST_PAD_NAME(webrtc_video_sink_)
         << ", audio: " << GST_PAD_NAME(webrtc_audio_sink_));
 
-    // Now link everything: tee -> queue -> webrtcbin
+    // Store viewer_id as C string for probes (will be valid for lifetime of peer)
+    // We'll use a static map to store these
+    static std::map<std::string, std::string> viewer_id_storage;
+    viewer_id_storage[viewer_id_] = viewer_id_;
+    const char* viewer_id_cstr = viewer_id_storage[viewer_id_].c_str();
 
-    // Link: video_tee -> video_queue
+    // CRITICAL FIX: For dynamic pipeline manipulation with tee elements,
+    // downstream elements MUST be in PLAYING state BEFORE linking to tee
+    // Otherwise, the tee's src pad remains in "flushing" mode and won't push data
+    LOG("PEER", "Syncing element states BEFORE linking (critical for data flow)...");
+
+    // First sync queues and webrtcbin to PLAYING state
+    if (!gst_element_sync_state_with_parent(video_queue_)) {
+        LOG("PEER-WARN", "Failed to sync video_queue state");
+    }
+    if (!gst_element_sync_state_with_parent(audio_queue_)) {
+        LOG("PEER-WARN", "Failed to sync audio_queue state");
+    }
+    if (!gst_element_sync_state_with_parent(webrtcbin_)) {
+        LOG("PEER-WARN", "Failed to sync webrtcbin state");
+    }
+
+    // Verify states before linking
+    GstState vq_state, aq_state, wb_state;
+    gst_element_get_state(video_queue_, &vq_state, nullptr, GST_CLOCK_TIME_NONE);
+    gst_element_get_state(audio_queue_, &aq_state, nullptr, GST_CLOCK_TIME_NONE);
+    gst_element_get_state(webrtcbin_, &wb_state, nullptr, GST_CLOCK_TIME_NONE);
+
+    LOG("PEER", "Pre-link states - video_queue: " << gst_element_state_get_name(vq_state)
+        << ", audio_queue: " << gst_element_state_get_name(aq_state)
+        << ", webrtcbin: " << gst_element_state_get_name(wb_state));
+
+    // Now link everything: tee -> queue -> webrtcbin
+    // DIAGNOSTIC: Add probes at each stage to track data flow
+
+    // Link: queue -> webrtcbin FIRST (so queue has a destination)
+    LOG("PEER", "Linking queue -> webrtcbin first...");
+
+    GstPad* vqueue_src = gst_element_get_static_pad(video_queue_, "src");
+    // Add probe to track buffers reaching webrtcbin
+    gst_pad_add_probe(vqueue_src, GST_PAD_PROBE_TYPE_BUFFER,
+                     webrtc_buffer_probe, (gpointer)viewer_id_cstr, nullptr);
+
+    GstPadLinkReturn vwebrtc_result = gst_pad_link(vqueue_src, webrtc_video_sink_);
+    gst_object_unref(vqueue_src);
+    if (vwebrtc_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link video queue to webrtcbin, result: " << vwebrtc_result);
+        return false;
+    }
+    LOG("PEER", "Linked video_queue -> webrtcbin");
+
+    GstPad* aqueue_src = gst_element_get_static_pad(audio_queue_, "src");
+    GstPadLinkReturn awebrtc_result = gst_pad_link(aqueue_src, webrtc_audio_sink_);
+    gst_object_unref(aqueue_src);
+    if (awebrtc_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link audio queue to webrtcbin, result: " << awebrtc_result);
+        return false;
+    }
+    LOG("PEER", "Linked audio_queue -> webrtcbin");
+
+    // NOW link tee -> queue (this completes the path and data should start flowing)
+    LOG("PEER", "Linking tee -> queue (data flow should start)...");
+
     GstPad* vqueue_sink = gst_element_get_static_pad(video_queue_, "sink");
+
+    // Add probe on tee src pad to see if tee is pushing data
+    gst_pad_add_probe(video_tee_pad_, GST_PAD_PROBE_TYPE_BUFFER,
+                     tee_src_probe, (gpointer)viewer_id_cstr, nullptr);
+
+    // Add probe on queue sink to see if data enters queue
+    gst_pad_add_probe(vqueue_sink, GST_PAD_PROBE_TYPE_BUFFER,
+                     queue_sink_probe, (gpointer)viewer_id_cstr, nullptr);
+
     GstPadLinkReturn vlink_result = gst_pad_link(video_tee_pad_, vqueue_sink);
     gst_object_unref(vqueue_sink);
     if (vlink_result != GST_PAD_LINK_OK) {
@@ -492,41 +586,41 @@ bool WebRTCPeer::initialize() {
     }
     LOG("PEER", "Linked audio_tee -> audio_queue");
 
-    // Link: video_queue -> webrtcbin
-    GstPad* vqueue_src = gst_element_get_static_pad(video_queue_, "src");
-    GstPadLinkReturn vwebrtc_result = gst_pad_link(vqueue_src, webrtc_video_sink_);
+    // Verify states after linking
+    GstState vq_state2, aq_state2, wb_state2;
+    gst_element_get_state(video_queue_, &vq_state2, nullptr, GST_CLOCK_TIME_NONE);
+    gst_element_get_state(audio_queue_, &aq_state2, nullptr, GST_CLOCK_TIME_NONE);
+    gst_element_get_state(webrtcbin_, &wb_state2, nullptr, GST_CLOCK_TIME_NONE);
 
-    // Add probe to track buffers reaching webrtcbin
-    gst_pad_add_probe(vqueue_src, GST_PAD_PROBE_TYPE_BUFFER,
-                     webrtc_buffer_probe, nullptr, nullptr);
+    LOG("PEER", "Post-link states - video_queue: " << gst_element_state_get_name(vq_state2)
+        << ", audio_queue: " << gst_element_state_get_name(aq_state2)
+        << ", webrtcbin: " << gst_element_state_get_name(wb_state2));
 
-    gst_object_unref(vqueue_src);
-    if (vwebrtc_result != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link video queue to webrtcbin, result: " << vwebrtc_result);
-        return false;
+    // Send reconfigure event to tee to ensure it pushes to the new pad
+    // This helps GStreamer recognize the new branch and start pushing data
+    GstPad* video_queue_sink = gst_element_get_static_pad(video_queue_, "sink");
+    if (video_queue_sink) {
+        gst_pad_send_event(video_queue_sink, gst_event_new_reconfigure());
+        gst_object_unref(video_queue_sink);
+        LOG("PEER", "Sent reconfigure event to video queue");
     }
-    LOG("PEER", "Linked video_queue -> webrtcbin");
 
-    // Link: audio_queue -> webrtcbin
-    GstPad* aqueue_src = gst_element_get_static_pad(audio_queue_, "src");
-    GstPadLinkReturn awebrtc_result = gst_pad_link(aqueue_src, webrtc_audio_sink_);
-    gst_object_unref(aqueue_src);
-    if (awebrtc_result != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link audio queue to webrtcbin, result: " << awebrtc_result);
-        return false;
+    GstPad* audio_queue_sink = gst_element_get_static_pad(audio_queue_, "sink");
+    if (audio_queue_sink) {
+        gst_pad_send_event(audio_queue_sink, gst_event_new_reconfigure());
+        gst_object_unref(audio_queue_sink);
+        LOG("PEER", "Sent reconfigure event to audio queue");
     }
-    LOG("PEER", "Linked audio_queue -> webrtcbin");
 
-    // NOW sync state after everything is linked
-    LOG("PEER", "Syncing element states with pipeline...");
-    if (!gst_element_sync_state_with_parent(video_queue_)) {
-        LOG("PEER-WARN", "Failed to sync video_queue state");
-    }
-    if (!gst_element_sync_state_with_parent(audio_queue_)) {
-        LOG("PEER-WARN", "Failed to sync audio_queue state");
-    }
-    if (!gst_element_sync_state_with_parent(webrtcbin_)) {
-        LOG("PEER-WARN", "Failed to sync webrtcbin state");
+    // Check tee pad caps
+    GstCaps* tee_caps = gst_pad_get_current_caps(video_tee_pad_);
+    if (tee_caps) {
+        gchar* caps_str = gst_caps_to_string(tee_caps);
+        LOG("PEER", "Tee src pad caps: " << caps_str);
+        g_free(caps_str);
+        gst_caps_unref(tee_caps);
+    } else {
+        LOG("PEER-WARN", "Tee src pad has NO CAPS - this may be the problem!");
     }
 
     // Connect signals
