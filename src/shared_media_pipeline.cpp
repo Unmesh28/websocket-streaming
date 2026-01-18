@@ -1,6 +1,7 @@
 #include "shared_media_pipeline.h"
 #include <gst/sdp/sdp.h>
 #include <gst/webrtc/webrtc.h>
+#include <gst/video/video.h>
 #include <iostream>
 #include <chrono>
 #include <iomanip>
@@ -81,6 +82,7 @@ SharedMediaPipeline::SharedMediaPipeline()
     : pipeline_(nullptr)
     , video_tee_(nullptr)
     , audio_tee_(nullptr)
+    , video_encoder_(nullptr)
     , is_running_(false) {
     LOG("SHARED", "SharedMediaPipeline created");
 }
@@ -132,7 +134,7 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
     std::string pipeline_str =
         // Video capture and encoding (shared)
         video_source +
-        "x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=15 bframes=0 ! "
+        "x264enc name=video_encoder tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=15 bframes=0 ! "
         "h264parse config-interval=1 ! "
         "rtph264pay config-interval=1 pt=96 ! "
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
@@ -175,8 +177,41 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
         return false;
     }
 
+    // Get video encoder for forcing keyframes
+    video_encoder_ = gst_bin_get_by_name(GST_BIN(pipeline_), "video_encoder");
+    if (!video_encoder_) {
+        LOG("SHARED-WARN", "Could not get video encoder (keyframe forcing disabled)");
+    } else {
+        LOG("SHARED", "Got video encoder for keyframe control");
+    }
+
     LOG("SHARED", "Shared pipeline created successfully with tee elements");
     return true;
+}
+
+void SharedMediaPipeline::forceKeyframe() {
+    if (!video_encoder_) {
+        LOG("SHARED", "Cannot force keyframe - no encoder reference");
+        return;
+    }
+
+    LOG("SHARED", "Forcing keyframe...");
+
+    // Send a force-keyunit event to the encoder's sink pad
+    GstPad* encoder_sink = gst_element_get_static_pad(video_encoder_, "sink");
+    if (encoder_sink) {
+        GstEvent* event = gst_video_event_new_upstream_force_key_unit(
+            GST_CLOCK_TIME_NONE,  // running_time
+            TRUE,                  // all_headers
+            0                      // count
+        );
+        if (gst_pad_send_event(encoder_sink, event)) {
+            LOG("SHARED", "Keyframe request sent successfully");
+        } else {
+            LOG("SHARED-WARN", "Failed to send keyframe request");
+        }
+        gst_object_unref(encoder_sink);
+    }
 }
 
 bool SharedMediaPipeline::start() {
@@ -247,8 +282,13 @@ WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
     viewers_[viewer_id] = peer;
     LOG_VAR("SHARED", "Viewer added successfully. Total viewers: ", viewers_.size());
 
+    // Force a keyframe so the new viewer can start decoding immediately
+    // Need to unlock mutex before calling forceKeyframe to avoid deadlock
+    // since forceKeyframe doesn't need the mutex
     return peer;
 }
+
+// Note: Call forceKeyframe() from StreamManager after addViewer() returns
 
 void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
     std::lock_guard<std::mutex> lock(mutex_);
