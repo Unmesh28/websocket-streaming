@@ -323,19 +323,31 @@ void SharedMediaPipeline::stop() {
 }
 
 WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LOG_VAR("SHARED", ">>> addViewer called for: ", viewer_id);
+    LOG("SHARED", "Current viewer count before add: " << viewers_.size());
 
-    LOG_VAR("SHARED", "Adding viewer: ", viewer_id);
+    std::lock_guard<std::mutex> lock(mutex_);
+    LOG("SHARED", "Acquired mutex for viewer: " << viewer_id);
 
     // Check if viewer already exists
     auto it = viewers_.find(viewer_id);
     if (it != viewers_.end()) {
-        LOG_VAR("SHARED", "Viewer already exists: ", viewer_id);
+        LOG_VAR("SHARED-WARN", "Viewer already exists, returning existing: ", viewer_id);
         return it->second;
     }
 
+    // Log current tee state for debugging
+    if (video_tee_) {
+        GstState tee_state;
+        gst_element_get_state(video_tee_, &tee_state, nullptr, GST_SECOND);
+        LOG("SHARED", "Video tee state: " << gst_element_state_get_name(tee_state));
+    }
+
     // Create new peer
+    LOG("SHARED", "Creating new WebRTCPeer for: " << viewer_id);
     WebRTCPeer* peer = new WebRTCPeer(viewer_id, pipeline_, video_tee_, audio_tee_);
+
+    LOG("SHARED", "Calling peer->initialize() for: " << viewer_id);
     if (!peer->initialize()) {
         LOG_VAR("SHARED-ERROR", "Failed to initialize peer: ", viewer_id);
         delete peer;
@@ -343,23 +355,27 @@ WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
     }
 
     viewers_[viewer_id] = peer;
-    LOG_VAR("SHARED", "Viewer added successfully. Total viewers: ", viewers_.size());
+    LOG("SHARED", "<<< Viewer added successfully: " << viewer_id << ", Total viewers: " << viewers_.size());
 
     return peer;
 }
 
 void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LOG_VAR("SHARED", ">>> removeViewer called for: ", viewer_id);
 
-    LOG_VAR("SHARED", "Removing viewer: ", viewer_id);
+    std::lock_guard<std::mutex> lock(mutex_);
+    LOG("SHARED", "Acquired mutex for removing: " << viewer_id);
 
     auto it = viewers_.find(viewer_id);
     if (it != viewers_.end()) {
+        LOG("SHARED", "Found viewer to remove, calling delete...");
         // Delete will call destructor which calls cleanup()
         // No need to call cleanup() explicitly - prevents race conditions
         delete it->second;
         viewers_.erase(it);
-        LOG_VAR("SHARED", "Viewer removed. Total viewers: ", viewers_.size());
+        LOG("SHARED", "<<< Viewer removed: " << viewer_id << ", Remaining viewers: " << viewers_.size());
+    } else {
+        LOG_VAR("SHARED-WARN", "Viewer not found in map: ", viewer_id);
     }
 }
 
@@ -411,6 +427,9 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , audio_tee_pad_(nullptr)
     , webrtc_video_sink_(nullptr)
     , webrtc_audio_sink_(nullptr)
+    , video_tee_probe_id_(0)
+    , video_queue_sink_probe_id_(0)
+    , video_queue_src_probe_id_(0)
     , cleaned_up_(false) {
     LOG_VAR("PEER", "WebRTCPeer created: ", viewer_id);
 }
@@ -517,15 +536,18 @@ bool WebRTCPeer::initialize() {
         LOG("PEER-WARN", "Failed to sync webrtcbin state");
     }
 
-    // Verify states before linking
+    // Verify states before linking (use 1 second timeout, not infinite)
     GstState vq_state, aq_state, wb_state;
-    gst_element_get_state(video_queue_, &vq_state, nullptr, GST_CLOCK_TIME_NONE);
-    gst_element_get_state(audio_queue_, &aq_state, nullptr, GST_CLOCK_TIME_NONE);
-    gst_element_get_state(webrtcbin_, &wb_state, nullptr, GST_CLOCK_TIME_NONE);
+    GstStateChangeReturn vq_ret = gst_element_get_state(video_queue_, &vq_state, nullptr, GST_SECOND);
+    GstStateChangeReturn aq_ret = gst_element_get_state(audio_queue_, &aq_state, nullptr, GST_SECOND);
+    GstStateChangeReturn wb_ret = gst_element_get_state(webrtcbin_, &wb_state, nullptr, GST_SECOND);
 
     LOG("PEER", "Pre-link states - video_queue: " << gst_element_state_get_name(vq_state)
+        << " (" << (vq_ret == GST_STATE_CHANGE_SUCCESS ? "OK" : "PENDING") << ")"
         << ", audio_queue: " << gst_element_state_get_name(aq_state)
-        << ", webrtcbin: " << gst_element_state_get_name(wb_state));
+        << " (" << (aq_ret == GST_STATE_CHANGE_SUCCESS ? "OK" : "PENDING") << ")"
+        << ", webrtcbin: " << gst_element_state_get_name(wb_state)
+        << " (" << (wb_ret == GST_STATE_CHANGE_SUCCESS ? "OK" : "PENDING") << ")");
 
     // Now link everything: tee -> queue -> webrtcbin
     // DIAGNOSTIC: Add probes at each stage to track data flow
@@ -534,9 +556,10 @@ bool WebRTCPeer::initialize() {
     LOG("PEER", "Linking queue -> webrtcbin first...");
 
     GstPad* vqueue_src = gst_element_get_static_pad(video_queue_, "src");
-    // Add probe to track buffers reaching webrtcbin
-    gst_pad_add_probe(vqueue_src, GST_PAD_PROBE_TYPE_BUFFER,
+    // Add probe to track buffers reaching webrtcbin (store ID for cleanup)
+    video_queue_src_probe_id_ = gst_pad_add_probe(vqueue_src, GST_PAD_PROBE_TYPE_BUFFER,
                      webrtc_buffer_probe, (gpointer)viewer_id_cstr, nullptr);
+    LOG("PEER", "Added webrtcbin probe ID: " << video_queue_src_probe_id_);
 
     GstPadLinkReturn vwebrtc_result = gst_pad_link(vqueue_src, webrtc_video_sink_);
     gst_object_unref(vqueue_src);
@@ -560,13 +583,15 @@ bool WebRTCPeer::initialize() {
 
     GstPad* vqueue_sink = gst_element_get_static_pad(video_queue_, "sink");
 
-    // Add probe on tee src pad to see if tee is pushing data
-    gst_pad_add_probe(video_tee_pad_, GST_PAD_PROBE_TYPE_BUFFER,
+    // Add probe on tee src pad to see if tee is pushing data (store ID for cleanup)
+    video_tee_probe_id_ = gst_pad_add_probe(video_tee_pad_, GST_PAD_PROBE_TYPE_BUFFER,
                      tee_src_probe, (gpointer)viewer_id_cstr, nullptr);
+    LOG("PEER", "Added tee src probe ID: " << video_tee_probe_id_);
 
-    // Add probe on queue sink to see if data enters queue
-    gst_pad_add_probe(vqueue_sink, GST_PAD_PROBE_TYPE_BUFFER,
+    // Add probe on queue sink to see if data enters queue (store ID for cleanup)
+    video_queue_sink_probe_id_ = gst_pad_add_probe(vqueue_sink, GST_PAD_PROBE_TYPE_BUFFER,
                      queue_sink_probe, (gpointer)viewer_id_cstr, nullptr);
+    LOG("PEER", "Added queue sink probe ID: " << video_queue_sink_probe_id_);
 
     GstPadLinkReturn vlink_result = gst_pad_link(video_tee_pad_, vqueue_sink);
     gst_object_unref(vqueue_sink);
@@ -586,11 +611,11 @@ bool WebRTCPeer::initialize() {
     }
     LOG("PEER", "Linked audio_tee -> audio_queue");
 
-    // Verify states after linking
+    // Verify states after linking (use 1 second timeout, not infinite)
     GstState vq_state2, aq_state2, wb_state2;
-    gst_element_get_state(video_queue_, &vq_state2, nullptr, GST_CLOCK_TIME_NONE);
-    gst_element_get_state(audio_queue_, &aq_state2, nullptr, GST_CLOCK_TIME_NONE);
-    gst_element_get_state(webrtcbin_, &wb_state2, nullptr, GST_CLOCK_TIME_NONE);
+    gst_element_get_state(video_queue_, &vq_state2, nullptr, GST_SECOND);
+    gst_element_get_state(audio_queue_, &aq_state2, nullptr, GST_SECOND);
+    gst_element_get_state(webrtcbin_, &wb_state2, nullptr, GST_SECOND);
 
     LOG("PEER", "Post-link states - video_queue: " << gst_element_state_get_name(vq_state2)
         << ", audio_queue: " << gst_element_state_get_name(aq_state2)
@@ -653,12 +678,43 @@ void WebRTCPeer::cleanup() {
     cleaned_up_ = true;
 
     // CRITICAL: For safe dynamic pipeline removal, we must:
-    // 1. Unlink pads first
+    // 0. Remove probes first (prevents callbacks during cleanup)
+    // 1. Unlink pads
     // 2. Release request pads
     // 3. Set elements to NULL
     // 4. Remove from bin
 
-    // First, unlink everything
+    // STEP 0: Remove all probes FIRST to prevent callbacks during cleanup
+    LOG("PEER", "Removing probes...");
+    if (video_tee_pad_ && video_tee_probe_id_ != 0) {
+        gst_pad_remove_probe(video_tee_pad_, video_tee_probe_id_);
+        LOG("PEER", "Removed tee src probe");
+        video_tee_probe_id_ = 0;
+    }
+    if (video_queue_) {
+        if (video_queue_sink_probe_id_ != 0) {
+            GstPad* queue_sink = gst_element_get_static_pad(video_queue_, "sink");
+            if (queue_sink) {
+                gst_pad_remove_probe(queue_sink, video_queue_sink_probe_id_);
+                gst_object_unref(queue_sink);
+                LOG("PEER", "Removed queue sink probe");
+            }
+            video_queue_sink_probe_id_ = 0;
+        }
+        if (video_queue_src_probe_id_ != 0) {
+            GstPad* queue_src = gst_element_get_static_pad(video_queue_, "src");
+            if (queue_src) {
+                gst_pad_remove_probe(queue_src, video_queue_src_probe_id_);
+                gst_object_unref(queue_src);
+                LOG("PEER", "Removed queue src probe");
+            }
+            video_queue_src_probe_id_ = 0;
+        }
+    }
+
+    // STEP 1: Unlink everything
+    LOG("PEER", "Unlinking pads...");
+
     // Unlink video path: tee -> queue -> webrtcbin
     if (video_tee_pad_ && video_queue_) {
         GstPad* queue_sink = gst_element_get_static_pad(video_queue_, "sink");
