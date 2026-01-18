@@ -353,7 +353,8 @@ void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
 
     auto it = viewers_.find(viewer_id);
     if (it != viewers_.end()) {
-        it->second->cleanup();
+        // Delete will call destructor which calls cleanup()
+        // No need to call cleanup() explicitly - prevents race conditions
         delete it->second;
         viewers_.erase(it);
         LOG_VAR("SHARED", "Viewer removed. Total viewers: ", viewers_.size());
@@ -384,7 +385,8 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , video_tee_pad_(nullptr)
     , audio_tee_pad_(nullptr)
     , webrtc_video_sink_(nullptr)
-    , webrtc_audio_sink_(nullptr) {
+    , webrtc_audio_sink_(nullptr)
+    , cleaned_up_(false) {
     LOG_VAR("PEER", "WebRTCPeer created: ", viewer_id);
 }
 
@@ -424,17 +426,20 @@ bool WebRTCPeer::initialize() {
         return false;
     }
 
-    // Configure queues - larger buffer to handle negotiation delay
-    // Don't use leaky queues - we want to buffer during negotiation
+    // Configure queues with leaky=upstream to prevent blocking tee
+    // If queue fills up (slow viewer), drop oldest buffers
+    // This prevents one slow viewer from blocking all others
     g_object_set(video_queue_,
-                 "max-size-buffers", 60,      // Buffer ~2 seconds at 30fps
-                 "max-size-time", (guint64)2000000000,  // 2 seconds
+                 "max-size-buffers", 30,      // ~1 second at 30fps
+                 "max-size-time", (guint64)1000000000,  // 1 second
                  "max-size-bytes", 0,
+                 "leaky", 2,                  // 2 = upstream (drop oldest)
                  nullptr);
     g_object_set(audio_queue_,
-                 "max-size-buffers", 100,
-                 "max-size-time", (guint64)2000000000,  // 2 seconds
+                 "max-size-buffers", 50,
+                 "max-size-time", (guint64)1000000000,  // 1 second
                  "max-size-bytes", 0,
+                 "leaky", 2,                  // 2 = upstream (drop oldest)
                  nullptr);
 
     // Add elements to pipeline FIRST
@@ -535,31 +540,90 @@ bool WebRTCPeer::initialize() {
 }
 
 void WebRTCPeer::cleanup() {
+    // Thread-safe cleanup with double-cleanup prevention
+    std::lock_guard<std::mutex> lock(cleanup_mutex_);
+
+    if (cleaned_up_) {
+        LOG_VAR("PEER", "Already cleaned up, skipping: ", viewer_id_);
+        return;
+    }
+
     LOG_VAR("PEER", "Cleaning up peer: ", viewer_id_);
 
-    if (!pipeline_) return;
-
-    // Set elements to NULL state
-    if (webrtcbin_) {
-        gst_element_set_state(webrtcbin_, GST_STATE_NULL);
-    }
-    if (video_queue_) {
-        gst_element_set_state(video_queue_, GST_STATE_NULL);
-    }
-    if (audio_queue_) {
-        gst_element_set_state(audio_queue_, GST_STATE_NULL);
+    if (!pipeline_) {
+        cleaned_up_ = true;
+        return;
     }
 
-    // Release tee pads
+    // Mark as cleaned up early to prevent concurrent cleanup attempts
+    cleaned_up_ = true;
+
+    // CRITICAL: For safe dynamic pipeline removal, we must:
+    // 1. Unlink pads first
+    // 2. Release request pads
+    // 3. Set elements to NULL
+    // 4. Remove from bin
+
+    // First, unlink everything
+    // Unlink video path: tee -> queue -> webrtcbin
+    if (video_tee_pad_ && video_queue_) {
+        GstPad* queue_sink = gst_element_get_static_pad(video_queue_, "sink");
+        if (queue_sink) {
+            if (gst_pad_is_linked(video_tee_pad_)) {
+                gst_pad_unlink(video_tee_pad_, queue_sink);
+                LOG("PEER", "Unlinked video_tee -> video_queue");
+            }
+            gst_object_unref(queue_sink);
+        }
+    }
+
+    if (video_queue_ && webrtc_video_sink_) {
+        GstPad* queue_src = gst_element_get_static_pad(video_queue_, "src");
+        if (queue_src) {
+            if (gst_pad_is_linked(queue_src)) {
+                gst_pad_unlink(queue_src, webrtc_video_sink_);
+                LOG("PEER", "Unlinked video_queue -> webrtcbin");
+            }
+            gst_object_unref(queue_src);
+        }
+    }
+
+    // Unlink audio path: tee -> queue -> webrtcbin
+    if (audio_tee_pad_ && audio_queue_) {
+        GstPad* queue_sink = gst_element_get_static_pad(audio_queue_, "sink");
+        if (queue_sink) {
+            if (gst_pad_is_linked(audio_tee_pad_)) {
+                gst_pad_unlink(audio_tee_pad_, queue_sink);
+                LOG("PEER", "Unlinked audio_tee -> audio_queue");
+            }
+            gst_object_unref(queue_sink);
+        }
+    }
+
+    if (audio_queue_ && webrtc_audio_sink_) {
+        GstPad* queue_src = gst_element_get_static_pad(audio_queue_, "src");
+        if (queue_src) {
+            if (gst_pad_is_linked(queue_src)) {
+                gst_pad_unlink(queue_src, webrtc_audio_sink_);
+                LOG("PEER", "Unlinked audio_queue -> webrtcbin");
+            }
+            gst_object_unref(queue_src);
+        }
+    }
+
+    // Release tee request pads BEFORE setting elements to NULL
+    // This is critical - releasing while linked can cause issues
     if (video_tee_pad_ && video_tee_) {
         gst_element_release_request_pad(video_tee_, video_tee_pad_);
         gst_object_unref(video_tee_pad_);
         video_tee_pad_ = nullptr;
+        LOG("PEER", "Released video tee pad");
     }
     if (audio_tee_pad_ && audio_tee_) {
         gst_element_release_request_pad(audio_tee_, audio_tee_pad_);
         gst_object_unref(audio_tee_pad_);
         audio_tee_pad_ = nullptr;
+        LOG("PEER", "Released audio tee pad");
     }
 
     // Release webrtcbin sink pads
@@ -574,11 +638,18 @@ void WebRTCPeer::cleanup() {
         webrtc_audio_sink_ = nullptr;
     }
 
-    // Remove elements from pipeline
-    if (webrtcbin_) {
-        gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
-        webrtcbin_ = nullptr;
+    // NOW set elements to NULL state (after unlinking)
+    if (video_queue_) {
+        gst_element_set_state(video_queue_, GST_STATE_NULL);
     }
+    if (audio_queue_) {
+        gst_element_set_state(audio_queue_, GST_STATE_NULL);
+    }
+    if (webrtcbin_) {
+        gst_element_set_state(webrtcbin_, GST_STATE_NULL);
+    }
+
+    // Remove elements from pipeline
     if (video_queue_) {
         gst_bin_remove(GST_BIN(pipeline_), video_queue_);
         video_queue_ = nullptr;
@@ -586,6 +657,10 @@ void WebRTCPeer::cleanup() {
     if (audio_queue_) {
         gst_bin_remove(GST_BIN(pipeline_), audio_queue_);
         audio_queue_ = nullptr;
+    }
+    if (webrtcbin_) {
+        gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
+        webrtcbin_ = nullptr;
     }
 
     LOG_VAR("PEER", "Peer cleanup complete: ", viewer_id_);

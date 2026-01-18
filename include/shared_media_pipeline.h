@@ -88,7 +88,7 @@ public:
     // Get viewer ID
     std::string getViewerId() const { return viewer_id_; }
 
-    // Cleanup - unlink from tees
+    // Cleanup - unlink from tees (safe to call multiple times)
     void cleanup();
 
 private:
@@ -103,6 +103,9 @@ private:
     GstPad* audio_tee_pad_;         // Our pad on audio tee
     GstPad* webrtc_video_sink_;     // Sink pad on webrtcbin for video
     GstPad* webrtc_audio_sink_;     // Sink pad on webrtcbin for audio
+
+    bool cleaned_up_;               // Prevent double cleanup
+    std::mutex cleanup_mutex_;      // Thread safety for cleanup
 
     std::function<void(const std::string&, int)> ice_candidate_callback_;
     std::function<void(const std::string&)> offer_callback_;
