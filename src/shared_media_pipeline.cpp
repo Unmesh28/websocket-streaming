@@ -31,6 +31,27 @@ static std::string getTimestamp() {
 #define LOG_VAR(category, msg, var)
 #endif
 
+// Buffer counting for debug
+static guint64 video_buffer_count = 0;
+static guint64 audio_buffer_count = 0;
+
+// Pad probe callback to count buffers at tee
+static GstPadProbeReturn tee_buffer_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    const char* media_type = (const char*)user_data;
+    if (strcmp(media_type, "video") == 0) {
+        video_buffer_count++;
+        if (video_buffer_count % 100 == 0) {
+            LOG("PROBE", "Video buffers at tee: " << video_buffer_count);
+        }
+    } else {
+        audio_buffer_count++;
+        if (audio_buffer_count % 100 == 0) {
+            LOG("PROBE", "Audio buffers at tee: " << audio_buffer_count);
+        }
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 // Bus message callback for pipeline monitoring
 static gboolean bus_callback(GstBus* bus, GstMessage* msg, gpointer user_data) {
     SharedMediaPipeline* pipeline = static_cast<SharedMediaPipeline*>(user_data);
@@ -126,33 +147,39 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
             "v4l2src device=" + video_device + " ! "
             "video/x-raw,width=1280,height=720,framerate=30/1 ! "
             "videoconvert ! "
-            "queue max-size-buffers=1 leaky=downstream ! ";
+            "queue max-size-buffers=3 leaky=downstream ! ";
     }
 
     // Create pipeline with tee elements for multi-viewer support
     // The video and audio are encoded once and distributed via tee elements
+    // IMPORTANT: Use fakesink on each tee to ensure data flows even with no viewers
     std::string pipeline_str =
         // Video capture and encoding (shared)
         video_source +
-        "x264enc name=video_encoder tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=15 bframes=0 ! "
-        "h264parse config-interval=1 ! "
-        "rtph264pay config-interval=1 pt=96 ! "
+        "x264enc name=video_encoder tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 bframes=0 ! "
+        "video/x-h264,profile=constrained-baseline ! "
+        "h264parse config-interval=-1 ! "
+        "rtph264pay config-interval=-1 pt=96 aggregate-mode=zero-latency ! "
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
         "tee name=video_tee allow-not-linked=true "
+        // Add a fakesink branch to ensure data always flows
+        "video_tee. ! queue ! fakesink async=false sync=false "
 
         // Audio capture and encoding (shared)
         "alsasrc device=" + audio_device + " ! "
         "audioconvert ! "
         "audioresample ! "
         "audio/x-raw,rate=48000,channels=1 ! "
-        "queue max-size-buffers=1 leaky=downstream ! "
+        "queue max-size-buffers=3 leaky=downstream ! "
         "opusenc bitrate=32000 ! "
         "rtpopuspay pt=97 ! "
         "application/x-rtp,media=audio,encoding-name=OPUS,payload=97 ! "
-        "tee name=audio_tee allow-not-linked=true";
+        "tee name=audio_tee allow-not-linked=true "
+        // Add a fakesink branch to ensure data always flows
+        "audio_tee. ! queue ! fakesink async=false sync=false";
 
     LOG("SHARED", "Creating shared pipeline...");
-    LOG("SHARED", "Pipeline: " << pipeline_str.substr(0, 300) << "...");
+    LOG("SHARED", "Pipeline: " << pipeline_str.substr(0, 400) << "...");
 
     pipeline_ = gst_parse_launch(pipeline_str.c_str(), &error);
 
@@ -185,32 +212,55 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
         LOG("SHARED", "Got video encoder for keyframe control");
     }
 
+    // Add debug probes on tee sink pads to verify data is flowing
+    GstPad* video_tee_sink = gst_element_get_static_pad(video_tee_, "sink");
+    if (video_tee_sink) {
+        gst_pad_add_probe(video_tee_sink, GST_PAD_PROBE_TYPE_BUFFER,
+                         tee_buffer_probe, (gpointer)"video", nullptr);
+        gst_object_unref(video_tee_sink);
+        LOG("SHARED", "Added video buffer probe on tee sink");
+    }
+
+    GstPad* audio_tee_sink = gst_element_get_static_pad(audio_tee_, "sink");
+    if (audio_tee_sink) {
+        gst_pad_add_probe(audio_tee_sink, GST_PAD_PROBE_TYPE_BUFFER,
+                         tee_buffer_probe, (gpointer)"audio", nullptr);
+        gst_object_unref(audio_tee_sink);
+        LOG("SHARED", "Added audio buffer probe on tee sink");
+    }
+
     LOG("SHARED", "Shared pipeline created successfully with tee elements");
     return true;
 }
 
 void SharedMediaPipeline::forceKeyframe() {
-    if (!video_encoder_) {
-        LOG("SHARED", "Cannot force keyframe - no encoder reference");
+    // FIXED: Send upstream event to DOWNSTREAM element's sink pad (video_tee's sink)
+    // The event will propagate upstream to the encoder
+    if (!video_tee_) {
+        LOG("SHARED", "Cannot force keyframe - no tee reference");
         return;
     }
 
-    LOG("SHARED", "Forcing keyframe...");
+    LOG("SHARED", "Forcing keyframe via tee sink pad...");
 
-    // Send a force-keyunit event to the encoder's sink pad
-    GstPad* encoder_sink = gst_element_get_static_pad(video_encoder_, "sink");
-    if (encoder_sink) {
+    // Send upstream force-key-unit event to the tee's sink pad
+    // This will propagate upstream through rtph264pay -> h264parse -> x264enc
+    GstPad* tee_sink = gst_element_get_static_pad(video_tee_, "sink");
+    if (tee_sink) {
         GstEvent* event = gst_video_event_new_upstream_force_key_unit(
             GST_CLOCK_TIME_NONE,  // running_time
-            TRUE,                  // all_headers
+            TRUE,                  // all_headers - include SPS/PPS
             0                      // count
         );
-        if (gst_pad_send_event(encoder_sink, event)) {
+        gboolean result = gst_pad_send_event(tee_sink, event);
+        if (result) {
             LOG("SHARED", "Keyframe request sent successfully");
         } else {
             LOG("SHARED-WARN", "Failed to send keyframe request");
         }
-        gst_object_unref(encoder_sink);
+        gst_object_unref(tee_sink);
+    } else {
+        LOG("SHARED-ERROR", "Could not get tee sink pad");
     }
 }
 
@@ -282,13 +332,8 @@ WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
     viewers_[viewer_id] = peer;
     LOG_VAR("SHARED", "Viewer added successfully. Total viewers: ", viewers_.size());
 
-    // Force a keyframe so the new viewer can start decoding immediately
-    // Need to unlock mutex before calling forceKeyframe to avoid deadlock
-    // since forceKeyframe doesn't need the mutex
     return peer;
 }
-
-// Note: Call forceKeyframe() from StreamManager after addViewer() returns
 
 void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -305,6 +350,16 @@ void SharedMediaPipeline::removeViewer(const std::string& viewer_id) {
 }
 
 // ==================== WebRTCPeer Implementation ====================
+
+// Buffer probe to count buffers reaching webrtcbin
+static GstPadProbeReturn webrtc_buffer_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    static guint64 webrtc_buffer_count = 0;
+    webrtc_buffer_count++;
+    if (webrtc_buffer_count % 100 == 0) {
+        LOG("PROBE", "Buffers reaching webrtcbin: " << webrtc_buffer_count);
+    }
+    return GST_PAD_PROBE_OK;
+}
 
 WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
                        GstElement* video_tee, GstElement* audio_tee)
@@ -349,6 +404,7 @@ bool WebRTCPeer::initialize() {
                  nullptr);
 
     // Create queues for video and audio
+    // IMPORTANT: Use larger queue to buffer data while webrtcbin negotiates
     video_queue_ = gst_element_factory_make("queue", vqueue_name.c_str());
     audio_queue_ = gst_element_factory_make("queue", aqueue_name.c_str());
 
@@ -357,17 +413,21 @@ bool WebRTCPeer::initialize() {
         return false;
     }
 
-    // Configure queues for low latency
-    g_object_set(video_queue_, "max-size-buffers", 1, "leaky", 2, nullptr);  // leaky=downstream
-    g_object_set(audio_queue_, "max-size-buffers", 1, "leaky", 2, nullptr);
+    // Configure queues - larger buffer to handle negotiation delay
+    // Don't use leaky queues - we want to buffer during negotiation
+    g_object_set(video_queue_,
+                 "max-size-buffers", 60,      // Buffer ~2 seconds at 30fps
+                 "max-size-time", (guint64)2000000000,  // 2 seconds
+                 "max-size-bytes", 0,
+                 nullptr);
+    g_object_set(audio_queue_,
+                 "max-size-buffers", 100,
+                 "max-size-time", (guint64)2000000000,  // 2 seconds
+                 "max-size-bytes", 0,
+                 nullptr);
 
-    // Add elements to pipeline
+    // Add elements to pipeline FIRST
     gst_bin_add_many(GST_BIN(pipeline_), video_queue_, audio_queue_, webrtcbin_, nullptr);
-
-    // Sync state BEFORE linking (elements must be in at least PAUSED state)
-    gst_element_sync_state_with_parent(video_queue_);
-    gst_element_sync_state_with_parent(audio_queue_);
-    gst_element_sync_state_with_parent(webrtcbin_);
 
     // Get request pads from tees
     video_tee_pad_ = gst_element_request_pad_simple(video_tee_, "src_%u");
@@ -381,29 +441,8 @@ bool WebRTCPeer::initialize() {
     LOG("PEER", "Got tee pads - video: " << GST_PAD_NAME(video_tee_pad_)
         << ", audio: " << GST_PAD_NAME(audio_tee_pad_));
 
-    // Link: video_tee -> video_queue
-    GstPad* vqueue_sink = gst_element_get_static_pad(video_queue_, "sink");
-    GstPadLinkReturn vlink_result = gst_pad_link(video_tee_pad_, vqueue_sink);
-    if (vlink_result != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link video tee to queue, result: " << vlink_result);
-        gst_object_unref(vqueue_sink);
-        return false;
-    }
-    gst_object_unref(vqueue_sink);
-    LOG("PEER", "Linked video_tee -> video_queue");
-
-    // Link: audio_tee -> audio_queue
-    GstPad* aqueue_sink = gst_element_get_static_pad(audio_queue_, "sink");
-    GstPadLinkReturn alink_result = gst_pad_link(audio_tee_pad_, aqueue_sink);
-    if (alink_result != GST_PAD_LINK_OK) {
-        LOG("PEER-ERROR", "Failed to link audio tee to queue, result: " << alink_result);
-        gst_object_unref(aqueue_sink);
-        return false;
-    }
-    gst_object_unref(aqueue_sink);
-    LOG("PEER", "Linked audio_tee -> audio_queue");
-
-    // Request sink pads from webrtcbin (webrtcbin uses request pads, not static pads)
+    // Request sink pads from webrtcbin BEFORE linking
+    // This allows webrtcbin to know about the media types
     webrtc_video_sink_ = gst_element_request_pad_simple(webrtcbin_, "sink_%u");
     webrtc_audio_sink_ = gst_element_request_pad_simple(webrtcbin_, "sink_%u");
 
@@ -415,9 +454,36 @@ bool WebRTCPeer::initialize() {
     LOG("PEER", "Got webrtcbin sink pads - video: " << GST_PAD_NAME(webrtc_video_sink_)
         << ", audio: " << GST_PAD_NAME(webrtc_audio_sink_));
 
+    // Now link everything: tee -> queue -> webrtcbin
+
+    // Link: video_tee -> video_queue
+    GstPad* vqueue_sink = gst_element_get_static_pad(video_queue_, "sink");
+    GstPadLinkReturn vlink_result = gst_pad_link(video_tee_pad_, vqueue_sink);
+    gst_object_unref(vqueue_sink);
+    if (vlink_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link video tee to queue, result: " << vlink_result);
+        return false;
+    }
+    LOG("PEER", "Linked video_tee -> video_queue");
+
+    // Link: audio_tee -> audio_queue
+    GstPad* aqueue_sink = gst_element_get_static_pad(audio_queue_, "sink");
+    GstPadLinkReturn alink_result = gst_pad_link(audio_tee_pad_, aqueue_sink);
+    gst_object_unref(aqueue_sink);
+    if (alink_result != GST_PAD_LINK_OK) {
+        LOG("PEER-ERROR", "Failed to link audio tee to queue, result: " << alink_result);
+        return false;
+    }
+    LOG("PEER", "Linked audio_tee -> audio_queue");
+
     // Link: video_queue -> webrtcbin
     GstPad* vqueue_src = gst_element_get_static_pad(video_queue_, "src");
     GstPadLinkReturn vwebrtc_result = gst_pad_link(vqueue_src, webrtc_video_sink_);
+
+    // Add probe to track buffers reaching webrtcbin
+    gst_pad_add_probe(vqueue_src, GST_PAD_PROBE_TYPE_BUFFER,
+                     webrtc_buffer_probe, nullptr, nullptr);
+
     gst_object_unref(vqueue_src);
     if (vwebrtc_result != GST_PAD_LINK_OK) {
         LOG("PEER-ERROR", "Failed to link video queue to webrtcbin, result: " << vwebrtc_result);
@@ -434,6 +500,18 @@ bool WebRTCPeer::initialize() {
         return false;
     }
     LOG("PEER", "Linked audio_queue -> webrtcbin");
+
+    // NOW sync state after everything is linked
+    LOG("PEER", "Syncing element states with pipeline...");
+    if (!gst_element_sync_state_with_parent(video_queue_)) {
+        LOG("PEER-WARN", "Failed to sync video_queue state");
+    }
+    if (!gst_element_sync_state_with_parent(audio_queue_)) {
+        LOG("PEER-WARN", "Failed to sync audio_queue state");
+    }
+    if (!gst_element_sync_state_with_parent(webrtcbin_)) {
+        LOG("PEER-WARN", "Failed to sync webrtcbin state");
+    }
 
     // Connect signals
     g_signal_connect(webrtcbin_, "on-negotiation-needed",
