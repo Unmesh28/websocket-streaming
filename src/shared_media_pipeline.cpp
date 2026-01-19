@@ -547,27 +547,43 @@ bool WebRTCPeer::initialize() {
     LOG("PEER", "Got webrtcbin sink pads - video: " << GST_PAD_NAME(webrtc_video_sink_)
         << ", audio: " << GST_PAD_NAME(webrtc_audio_sink_));
 
-    // CRITICAL FIX: Copy caps from tee pads to ensure webrtcbin knows the media types
-    // This is essential for generating correct SDP offers for all viewers
+    // CRITICAL FIX: Get caps from tee pads and explicitly add transceivers
+    // This ensures proper SDP generation for ALL viewers, not just the first one
     GstCaps* video_caps = gst_pad_get_current_caps(video_tee_pad_);
     GstCaps* audio_caps = gst_pad_get_current_caps(audio_tee_pad_);
 
     if (video_caps) {
-        // Create a capsfilter-like behavior by setting allowed caps
-        LOG("PEER", "Setting video caps on webrtcbin sink");
         gchar* caps_str = gst_caps_to_string(video_caps);
-        LOG("PEER", "Video caps: " << caps_str);
+        LOG("PEER", "Video caps from tee: " << caps_str);
         g_free(caps_str);
+
+        // Explicitly add a video transceiver with sendonly direction
+        // This ensures the video track is included in the SDP offer
+        GstWebRTCRTPTransceiver* video_trans = nullptr;
+        g_signal_emit_by_name(webrtcbin_, "add-transceiver",
+                             GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY, video_caps, &video_trans);
+        if (video_trans) {
+            LOG("PEER", "Added video transceiver for " << viewer_id_);
+            gst_object_unref(video_trans);
+        }
         gst_caps_unref(video_caps);
     } else {
         LOG("PEER-WARN", "No video caps available from tee - SDP may be incomplete");
     }
 
     if (audio_caps) {
-        LOG("PEER", "Setting audio caps on webrtcbin sink");
         gchar* caps_str = gst_caps_to_string(audio_caps);
-        LOG("PEER", "Audio caps: " << caps_str);
+        LOG("PEER", "Audio caps from tee: " << caps_str);
         g_free(caps_str);
+
+        // Explicitly add an audio transceiver with sendonly direction
+        GstWebRTCRTPTransceiver* audio_trans = nullptr;
+        g_signal_emit_by_name(webrtcbin_, "add-transceiver",
+                             GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY, audio_caps, &audio_trans);
+        if (audio_trans) {
+            LOG("PEER", "Added audio transceiver for " << viewer_id_);
+            gst_object_unref(audio_trans);
+        }
         gst_caps_unref(audio_caps);
     } else {
         LOG("PEER-WARN", "No audio caps available from tee - SDP may be incomplete");
@@ -890,6 +906,23 @@ void WebRTCPeer::cleanup() {
 void WebRTCPeer::createOffer(std::function<void(const std::string&)> callback) {
     LOG_VAR("PEER", "Creating offer for: ", viewer_id_);
     offer_callback_ = callback;
+
+    // CRITICAL FIX: Ensure transceivers exist before creating offer
+    // Check if webrtcbin has transceivers, if not, there may be a caps issue
+    GArray* transceivers = nullptr;
+    g_signal_emit_by_name(webrtcbin_, "get-transceivers", &transceivers);
+    if (transceivers) {
+        LOG("PEER", viewer_id_ << " has " << transceivers->len << " transceivers before offer");
+        if (transceivers->len == 0) {
+            LOG("PEER-WARN", viewer_id_ << " WARNING: No transceivers - SDP will be incomplete!");
+            LOG("PEER-WARN", viewer_id_ << " This usually means caps haven't propagated yet");
+        }
+        g_array_unref(transceivers);
+    }
+
+    // Small delay to allow caps to propagate through pipeline
+    // This helps ensure transceivers are created from linked pads
+    g_usleep(50000);  // 50ms
 
     GstPromise* promise = gst_promise_new_with_change_func(onOfferCreated, this, nullptr);
     g_signal_emit_by_name(webrtcbin_, "create-offer", nullptr, promise);
