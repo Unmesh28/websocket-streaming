@@ -6,6 +6,8 @@
 #include <map>
 #include <mutex>
 #include <functional>
+#include <vector>
+#include <atomic>
 
 // Forward declaration
 class WebRTCPeer;
@@ -79,8 +81,11 @@ public:
     // Handle remote answer
     void setRemoteAnswer(const std::string& sdp);
 
-    // Handle ICE candidate
+    // Handle ICE candidate (queues if remote description not set)
     void addIceCandidate(const std::string& candidate, int sdp_mline_index);
+
+    // Process queued ICE candidates (called after remote description is set)
+    void processQueuedIceCandidates();
 
     // Set callback for ICE candidates
     void setIceCandidateCallback(std::function<void(const std::string&, int)> callback);
@@ -111,6 +116,15 @@ private:
 
     bool cleaned_up_;               // Prevent double cleanup
     std::mutex cleanup_mutex_;      // Thread safety for cleanup
+
+    // ICE candidate queuing to prevent libnice crashes
+    struct IceCandidate {
+        std::string candidate;
+        int sdp_mline_index;
+    };
+    std::vector<IceCandidate> queued_ice_candidates_;
+    std::atomic<bool> remote_description_set_;
+    std::mutex ice_mutex_;          // Thread safety for ICE operations
 
     std::function<void(const std::string&, int)> ice_candidate_callback_;
     std::function<void(const std::string&)> offer_callback_;

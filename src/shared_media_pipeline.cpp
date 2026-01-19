@@ -430,7 +430,8 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , video_tee_probe_id_(0)
     , video_queue_sink_probe_id_(0)
     , video_queue_src_probe_id_(0)
-    , cleaned_up_(false) {
+    , cleaned_up_(false)
+    , remote_description_set_(false) {
     LOG_VAR("PEER", "WebRTCPeer created: ", viewer_id);
 }
 
@@ -672,6 +673,13 @@ void WebRTCPeer::cleanup() {
 
     LOG_VAR("PEER", "Cleaning up peer: ", viewer_id_);
 
+    // Clear ICE candidate queue first
+    {
+        std::lock_guard<std::mutex> ice_lock(ice_mutex_);
+        queued_ice_candidates_.clear();
+        remote_description_set_.store(false);
+    }
+
     if (!pipeline_) {
         cleaned_up_ = true;
         return;
@@ -871,18 +879,70 @@ void WebRTCPeer::setRemoteAnswer(const std::string& sdp) {
     GstWebRTCSessionDescription* answer =
         gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp_msg);
 
+    // Set remote description synchronously first
     GstPromise* promise = gst_promise_new();
     g_signal_emit_by_name(webrtcbin_, "set-remote-description", answer, promise);
-    gst_promise_interrupt(promise);
+
+    // Wait for it to complete with a timeout
+    GstPromiseResult result = gst_promise_wait(promise);
     gst_promise_unref(promise);
 
+    if (result == GST_PROMISE_RESULT_REPLIED) {
+        LOG("PEER", "Remote description set successfully for: " << viewer_id_);
+    } else {
+        LOG("PEER-WARN", "Remote description set with result: " << result << " for: " << viewer_id_);
+    }
+
     gst_webrtc_session_description_free(answer);
-    LOG_VAR("PEER", "Remote answer set for: ", viewer_id_);
+
+    // CRITICAL: Mark remote description as set AFTER it's fully applied
+    // This ensures all ICE candidates received before this point are queued
+    remote_description_set_.store(true);
+    LOG_VAR("PEER", "Remote answer applied for: ", viewer_id_);
+
+    // Now process any queued ICE candidates
+    processQueuedIceCandidates();
 }
 
 void WebRTCPeer::addIceCandidate(const std::string& candidate, int sdp_mline_index) {
+    // CRITICAL FIX for libnice crash:
+    // Queue ICE candidates until remote description is set
+    // Adding candidates too early or too rapidly causes libnice assertion failures
+
+    std::lock_guard<std::mutex> lock(ice_mutex_);
+
+    if (!remote_description_set_.load()) {
+        // Queue the candidate - will be processed after setRemoteAnswer
+        LOG("PEER", "Queuing ICE candidate for " << viewer_id_ << " (remote desc not set), mlineindex: " << sdp_mline_index);
+        queued_ice_candidates_.push_back({candidate, sdp_mline_index});
+        return;
+    }
+
+    // Remote description is set, add candidate directly
     LOG("PEER", "Adding ICE candidate for " << viewer_id_ << ", mlineindex: " << sdp_mline_index);
     g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", sdp_mline_index, candidate.c_str());
+}
+
+void WebRTCPeer::processQueuedIceCandidates() {
+    std::lock_guard<std::mutex> lock(ice_mutex_);
+
+    if (queued_ice_candidates_.empty()) {
+        LOG("PEER", "No queued ICE candidates to process for " << viewer_id_);
+        return;
+    }
+
+    LOG("PEER", "Processing " << queued_ice_candidates_.size() << " queued ICE candidates for " << viewer_id_);
+
+    // Process candidates with a small delay between each to avoid overwhelming libnice
+    for (size_t i = 0; i < queued_ice_candidates_.size(); i++) {
+        const auto& ice = queued_ice_candidates_[i];
+        LOG("PEER", "Adding queued ICE candidate " << (i+1) << "/" << queued_ice_candidates_.size()
+            << " for " << viewer_id_ << ", mlineindex: " << ice.sdp_mline_index);
+        g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", ice.sdp_mline_index, ice.candidate.c_str());
+    }
+
+    LOG("PEER", "Finished processing queued ICE candidates for " << viewer_id_);
+    queued_ice_candidates_.clear();
 }
 
 void WebRTCPeer::onNegotiationNeeded(GstElement* webrtc, gpointer user_data) {
