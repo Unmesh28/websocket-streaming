@@ -414,6 +414,18 @@ static GstPadProbeReturn webrtc_buffer_probe(GstPad* pad, GstPadProbeInfo* info,
     return GST_PAD_PROBE_OK;
 }
 
+// Static TURN configuration
+WebRTCPeer::TurnConfig WebRTCPeer::turn_config_;
+bool WebRTCPeer::turn_configured_ = false;
+
+void WebRTCPeer::setTurnServer(const TurnConfig& config) {
+    turn_config_ = config;
+    turn_configured_ = !config.uri.empty();
+    if (turn_configured_) {
+        LOG("TURN", "TURN server configured: " << config.uri);
+    }
+}
+
 WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
                        GstElement* video_tee, GstElement* audio_tee)
     : viewer_id_(viewer_id)
@@ -455,11 +467,31 @@ bool WebRTCPeer::initialize() {
         return false;
     }
 
-    // Configure webrtcbin
+    // Configure webrtcbin with STUN and optionally TURN
     g_object_set(webrtcbin_,
                  "bundle-policy", 3,  // max-bundle
                  "stun-server", "stun://stun.l.google.com:19302",
                  nullptr);
+
+    // Add TURN server if configured (critical for NAT traversal)
+    if (turn_configured_) {
+        std::string turn_uri = turn_config_.uri;
+        // Format: turn://username:password@server:port or turns:// for TLS
+        if (!turn_config_.username.empty()) {
+            // Insert credentials into URI
+            size_t pos = turn_uri.find("://");
+            if (pos != std::string::npos) {
+                turn_uri = turn_uri.substr(0, pos + 3) +
+                          turn_config_.username + ":" +
+                          turn_config_.password + "@" +
+                          turn_uri.substr(pos + 3);
+            }
+        }
+        LOG("PEER", "Setting TURN server: " << turn_config_.uri);
+        g_object_set(webrtcbin_, "turn-server", turn_uri.c_str(), nullptr);
+    } else {
+        LOG("PEER-WARN", "No TURN server configured - NAT traversal may fail for remote viewers");
+    }
 
     // Create queues for video and audio
     // IMPORTANT: Use larger queue to buffer data while webrtcbin negotiates
@@ -514,6 +546,48 @@ bool WebRTCPeer::initialize() {
 
     LOG("PEER", "Got webrtcbin sink pads - video: " << GST_PAD_NAME(webrtc_video_sink_)
         << ", audio: " << GST_PAD_NAME(webrtc_audio_sink_));
+
+    // CRITICAL FIX: Get caps from tee pads and explicitly add transceivers
+    // This ensures proper SDP generation for ALL viewers, not just the first one
+    GstCaps* video_caps = gst_pad_get_current_caps(video_tee_pad_);
+    GstCaps* audio_caps = gst_pad_get_current_caps(audio_tee_pad_);
+
+    if (video_caps) {
+        gchar* caps_str = gst_caps_to_string(video_caps);
+        LOG("PEER", "Video caps from tee: " << caps_str);
+        g_free(caps_str);
+
+        // Explicitly add a video transceiver with sendonly direction
+        // This ensures the video track is included in the SDP offer
+        GstWebRTCRTPTransceiver* video_trans = nullptr;
+        g_signal_emit_by_name(webrtcbin_, "add-transceiver",
+                             GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY, video_caps, &video_trans);
+        if (video_trans) {
+            LOG("PEER", "Added video transceiver for " << viewer_id_);
+            gst_object_unref(video_trans);
+        }
+        gst_caps_unref(video_caps);
+    } else {
+        LOG("PEER-WARN", "No video caps available from tee - SDP may be incomplete");
+    }
+
+    if (audio_caps) {
+        gchar* caps_str = gst_caps_to_string(audio_caps);
+        LOG("PEER", "Audio caps from tee: " << caps_str);
+        g_free(caps_str);
+
+        // Explicitly add an audio transceiver with sendonly direction
+        GstWebRTCRTPTransceiver* audio_trans = nullptr;
+        g_signal_emit_by_name(webrtcbin_, "add-transceiver",
+                             GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_SENDONLY, audio_caps, &audio_trans);
+        if (audio_trans) {
+            LOG("PEER", "Added audio transceiver for " << viewer_id_);
+            gst_object_unref(audio_trans);
+        }
+        gst_caps_unref(audio_caps);
+    } else {
+        LOG("PEER-WARN", "No audio caps available from tee - SDP may be incomplete");
+    }
 
     // Store viewer_id as C string for probes (will be valid for lifetime of peer)
     // We'll use a static map to store these
@@ -657,6 +731,8 @@ bool WebRTCPeer::initialize() {
                     G_CALLBACK(onIceConnectionStateChange), this);
     g_signal_connect(webrtcbin_, "notify::connection-state",
                     G_CALLBACK(onConnectionStateChange), this);
+    g_signal_connect(webrtcbin_, "notify::ice-gathering-state",
+                    G_CALLBACK(onIceGatheringStateChange), this);
 
     LOG_VAR("PEER", "Peer initialized successfully: ", viewer_id_);
     return true;
@@ -831,6 +907,23 @@ void WebRTCPeer::createOffer(std::function<void(const std::string&)> callback) {
     LOG_VAR("PEER", "Creating offer for: ", viewer_id_);
     offer_callback_ = callback;
 
+    // CRITICAL FIX: Ensure transceivers exist before creating offer
+    // Check if webrtcbin has transceivers, if not, there may be a caps issue
+    GArray* transceivers = nullptr;
+    g_signal_emit_by_name(webrtcbin_, "get-transceivers", &transceivers);
+    if (transceivers) {
+        LOG("PEER", viewer_id_ << " has " << transceivers->len << " transceivers before offer");
+        if (transceivers->len == 0) {
+            LOG("PEER-WARN", viewer_id_ << " WARNING: No transceivers - SDP will be incomplete!");
+            LOG("PEER-WARN", viewer_id_ << " This usually means caps haven't propagated yet");
+        }
+        g_array_unref(transceivers);
+    }
+
+    // Small delay to allow caps to propagate through pipeline
+    // This helps ensure transceivers are created from linked pads
+    g_usleep(50000);  // 50ms
+
     GstPromise* promise = gst_promise_new_with_change_func(onOfferCreated, this, nullptr);
     g_signal_emit_by_name(webrtcbin_, "create-offer", nullptr, promise);
 }
@@ -862,6 +955,27 @@ void WebRTCPeer::onOfferCreated(GstPromise* promise, gpointer user_data) {
 
     LOG_VAR("PEER", "SDP offer length: ", sdp.length());
 
+    // Log SDP details for debugging multi-viewer issues
+    // Extract key info: media lines, ice-ufrag, ice-pwd
+    size_t video_pos = sdp.find("m=video");
+    size_t audio_pos = sdp.find("m=audio");
+    size_t ufrag_pos = sdp.find("a=ice-ufrag:");
+    size_t pwd_pos = sdp.find("a=ice-pwd:");
+
+    LOG("SDP-DEBUG", peer->viewer_id_ << " SDP contains video: " << (video_pos != std::string::npos ? "YES" : "NO")
+        << ", audio: " << (audio_pos != std::string::npos ? "YES" : "NO"));
+
+    if (ufrag_pos != std::string::npos) {
+        size_t ufrag_end = sdp.find("\r\n", ufrag_pos);
+        std::string ufrag = sdp.substr(ufrag_pos + 12, std::min((size_t)20, ufrag_end - ufrag_pos - 12));
+        LOG("SDP-DEBUG", peer->viewer_id_ << " ice-ufrag: " << ufrag);
+    }
+    if (pwd_pos != std::string::npos) {
+        size_t pwd_end = sdp.find("\r\n", pwd_pos);
+        std::string pwd = sdp.substr(pwd_pos + 10, std::min((size_t)8, pwd_end - pwd_pos - 10)) + "...";
+        LOG("SDP-DEBUG", peer->viewer_id_ << " ice-pwd: " << pwd);
+    }
+
     if (peer->offer_callback_) {
         peer->offer_callback_(sdp);
     }
@@ -871,6 +985,25 @@ void WebRTCPeer::onOfferCreated(GstPromise* promise, gpointer user_data) {
 
 void WebRTCPeer::setRemoteAnswer(const std::string& sdp) {
     LOG_VAR("PEER", "Setting remote answer for: ", viewer_id_);
+    LOG("SDP-DEBUG", viewer_id_ << " Answer SDP length: " << sdp.length());
+
+    // Log answer SDP details
+    size_t video_pos = sdp.find("m=video");
+    size_t audio_pos = sdp.find("m=audio");
+    LOG("SDP-DEBUG", viewer_id_ << " Answer contains video: " << (video_pos != std::string::npos ? "YES" : "NO")
+        << ", audio: " << (audio_pos != std::string::npos ? "YES" : "NO"));
+
+    // Check if audio track was rejected (port 0)
+    if (audio_pos != std::string::npos) {
+        size_t port_start = audio_pos + 8; // after "m=audio "
+        size_t port_end = sdp.find(" ", port_start);
+        if (port_end != std::string::npos) {
+            std::string port = sdp.substr(port_start, port_end - port_start);
+            if (port == "0") {
+                LOG("SDP-DEBUG", viewer_id_ << " WARNING: Browser REJECTED audio track (port=0)");
+            }
+        }
+    }
 
     GstSDPMessage* sdp_msg;
     gst_sdp_message_new(&sdp_msg);
@@ -1002,6 +1135,25 @@ void WebRTCPeer::onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, 
     const char* state_name = (conn_state < 6) ? state_names[conn_state] : "unknown";
 
     LOG("CONN-STATE", peer->viewer_id_ << " connection state: " << state_name << " (" << conn_state << ")");
+}
+
+// ICE gathering state callback - shows when local candidate gathering is complete
+void WebRTCPeer::onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    guint gather_state;
+    g_object_get(webrtc, "ice-gathering-state", &gather_state, nullptr);
+
+    const char* state_names[] = {
+        "new", "gathering", "complete"
+    };
+    const char* state_name = (gather_state < 3) ? state_names[gather_state] : "unknown";
+
+    LOG("ICE-GATHER", peer->viewer_id_ << " ICE gathering state: " << state_name << " (" << gather_state << ")");
+
+    if (gather_state == 2) { // complete
+        LOG("ICE-GATHER", peer->viewer_id_ << " >>> All local ICE candidates gathered <<<");
+    }
 }
 
 void WebRTCPeer::setIceCandidateCallback(
