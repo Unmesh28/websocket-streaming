@@ -887,12 +887,33 @@ void WebRTCPeer::createOffer(std::function<void(const std::string&)> callback) {
     LOG_VAR("PEER", "Creating offer for: ", viewer_id_);
     offer_callback_ = callback;
 
-    // Check transceiver count for debugging
-    GArray* transceivers = nullptr;
-    g_signal_emit_by_name(webrtcbin_, "get-transceivers", &transceivers);
-    if (transceivers) {
-        LOG("PEER", viewer_id_ << " has " << transceivers->len << " transceivers before offer");
-        g_array_unref(transceivers);
+    // CRITICAL: Wait for transceivers to be created from pad linking
+    // Webrtcbin creates transceivers when data flows through sink pads
+    // We need to wait until we have both video and audio transceivers
+    int wait_count = 0;
+    const int max_wait = 20;  // Max 200ms wait (20 * 10ms)
+
+    while (wait_count < max_wait) {
+        GArray* transceivers = nullptr;
+        g_signal_emit_by_name(webrtcbin_, "get-transceivers", &transceivers);
+
+        if (transceivers) {
+            guint count = transceivers->len;
+            g_array_unref(transceivers);
+
+            if (count >= 2) {
+                LOG("PEER", viewer_id_ << " has " << count << " transceivers - ready to create offer");
+                break;
+            }
+            LOG("PEER", viewer_id_ << " waiting for transceivers... currently " << count);
+        }
+
+        g_usleep(10000);  // 10ms
+        wait_count++;
+    }
+
+    if (wait_count >= max_wait) {
+        LOG("PEER-WARN", viewer_id_ << " timeout waiting for transceivers - offer may be incomplete");
     }
 
     GstPromise* promise = gst_promise_new_with_change_func(onOfferCreated, this, nullptr);
