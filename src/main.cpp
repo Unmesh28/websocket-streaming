@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <map>
 #include <memory>
+#include <cstdlib>
 #include <gst/gst.h>
 
 static bool running = true;
@@ -221,6 +222,22 @@ int main(int argc, char* argv[]) {
         ? "CSI (Pi Camera Module)"
         : "USB (" + video_device + ")";
 
+    // Check for TURN server configuration from environment variables
+    // TURN is CRITICAL for NAT traversal when viewers are on different networks
+    const char* turn_uri_env = std::getenv("TURN_SERVER");
+    const char* turn_user_env = std::getenv("TURN_USERNAME");
+    const char* turn_pass_env = std::getenv("TURN_PASSWORD");
+
+    std::string turn_display = "Not configured";
+    if (turn_uri_env && turn_uri_env[0]) {
+        WebRTCPeer::TurnConfig turn_config;
+        turn_config.uri = turn_uri_env;
+        if (turn_user_env) turn_config.username = turn_user_env;
+        if (turn_pass_env) turn_config.password = turn_pass_env;
+        WebRTCPeer::setTurnServer(turn_config);
+        turn_display = turn_config.uri;
+    }
+
     std::cout << "\n=====================================" << std::endl;
     std::cout << "  WebRTC Streamer for Raspberry Pi" << std::endl;
     std::cout << "  (Multi-Viewer Support Enabled)" << std::endl;
@@ -229,6 +246,10 @@ int main(int argc, char* argv[]) {
     std::cout << "Stream ID: " << stream_id << std::endl;
     std::cout << "Camera:    " << camera_display << std::endl;
     std::cout << "Audio:     " << audio_device << std::endl;
+    std::cout << "TURN:      " << turn_display << std::endl;
+    if (turn_display == "Not configured") {
+        std::cout << "           (Set TURN_SERVER, TURN_USERNAME, TURN_PASSWORD env vars for NAT traversal)" << std::endl;
+    }
     std::cout << "=====================================\n" << std::endl;
 
     // Create and start stream manager

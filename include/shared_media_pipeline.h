@@ -68,12 +68,22 @@ private:
 // WebRTC peer connection for a single viewer
 class WebRTCPeer {
 public:
+    // TURN server configuration
+    struct TurnConfig {
+        std::string uri;        // e.g., "turn:turn.example.com:3478"
+        std::string username;
+        std::string password;
+    };
+
     WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
                GstElement* video_tee, GstElement* audio_tee);
     ~WebRTCPeer();
 
     // Initialize the webrtcbin
     bool initialize();
+
+    // Set TURN server (must be called before initialize())
+    static void setTurnServer(const TurnConfig& config);
 
     // Create offer for WebRTC negotiation
     void createOffer(std::function<void(const std::string&)> callback);
@@ -129,6 +139,10 @@ private:
     std::function<void(const std::string&, int)> ice_candidate_callback_;
     std::function<void(const std::string&)> offer_callback_;
 
+    // Static TURN server config (shared by all peers)
+    static TurnConfig turn_config_;
+    static bool turn_configured_;
+
     // GStreamer callbacks
     static void onNegotiationNeeded(GstElement* webrtc, gpointer user_data);
     static void onIceCandidate(GstElement* webrtc, guint mlineindex,
@@ -136,6 +150,7 @@ private:
     static void onOfferCreated(GstPromise* promise, gpointer user_data);
     static void onIceConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
     static void onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
+    static void onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
 };
 
 #endif // SHARED_MEDIA_PIPELINE_H
