@@ -104,6 +104,11 @@ private:
     GstPad* webrtc_video_sink_;     // Sink pad on webrtcbin for video
     GstPad* webrtc_audio_sink_;     // Sink pad on webrtcbin for audio
 
+    // Probe IDs for cleanup
+    gulong video_tee_probe_id_;
+    gulong video_queue_sink_probe_id_;
+    gulong video_queue_src_probe_id_;
+
     bool cleaned_up_;               // Prevent double cleanup
     std::mutex cleanup_mutex_;      // Thread safety for cleanup
 
