@@ -120,6 +120,8 @@ private:
     static void onIceCandidate(GstElement* webrtc, guint mlineindex,
                               gchar* candidate, gpointer user_data);
     static void onOfferCreated(GstPromise* promise, gpointer user_data);
+    static void onIceConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
+    static void onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
 };
 
 #endif // SHARED_MEDIA_PIPELINE_H

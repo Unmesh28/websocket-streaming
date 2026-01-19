@@ -621,20 +621,17 @@ bool WebRTCPeer::initialize() {
         << ", audio_queue: " << gst_element_state_get_name(aq_state2)
         << ", webrtcbin: " << gst_element_state_get_name(wb_state2));
 
-    // Send reconfigure event to tee to ensure it pushes to the new pad
-    // This helps GStreamer recognize the new branch and start pushing data
-    GstPad* video_queue_sink = gst_element_get_static_pad(video_queue_, "sink");
-    if (video_queue_sink) {
-        gst_pad_send_event(video_queue_sink, gst_event_new_reconfigure());
-        gst_object_unref(video_queue_sink);
-        LOG("PEER", "Sent reconfigure event to video queue");
-    }
-
-    GstPad* audio_queue_sink = gst_element_get_static_pad(audio_queue_, "sink");
-    if (audio_queue_sink) {
-        gst_pad_send_event(audio_queue_sink, gst_event_new_reconfigure());
-        gst_object_unref(audio_queue_sink);
-        LOG("PEER", "Sent reconfigure event to audio queue");
+    // Check queue src pad state and link status
+    GstPad* vqueue_src_check = gst_element_get_static_pad(video_queue_, "src");
+    if (vqueue_src_check) {
+        GstPad* peer_pad = gst_pad_get_peer(vqueue_src_check);
+        if (peer_pad) {
+            LOG("PEER", "Video queue src pad is linked to: " << GST_PAD_NAME(peer_pad));
+            gst_object_unref(peer_pad);
+        } else {
+            LOG("PEER-WARN", "Video queue src pad is NOT linked!");
+        }
+        gst_object_unref(vqueue_src_check);
     }
 
     // Check tee pad caps
@@ -653,6 +650,12 @@ bool WebRTCPeer::initialize() {
                     G_CALLBACK(onNegotiationNeeded), this);
     g_signal_connect(webrtcbin_, "on-ice-candidate",
                     G_CALLBACK(onIceCandidate), this);
+
+    // CRITICAL: Monitor ICE connection state to debug connection issues
+    g_signal_connect(webrtcbin_, "notify::ice-connection-state",
+                    G_CALLBACK(onIceConnectionStateChange), this);
+    g_signal_connect(webrtcbin_, "notify::connection-state",
+                    G_CALLBACK(onConnectionStateChange), this);
 
     LOG_VAR("PEER", "Peer initialized successfully: ", viewer_id_);
     return true;
@@ -900,6 +903,45 @@ void WebRTCPeer::onIceCandidate(GstElement* webrtc, guint mlineindex,
     } else {
         LOG_VAR("PEER", "ICE gathering complete for: ", peer->viewer_id_);
     }
+}
+
+// ICE connection state callback - CRITICAL for debugging connection issues
+void WebRTCPeer::onIceConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    guint ice_state;
+    g_object_get(webrtc, "ice-connection-state", &ice_state, nullptr);
+
+    const char* state_names[] = {
+        "new", "checking", "connected", "completed", "failed", "disconnected", "closed"
+    };
+    const char* state_name = (ice_state < 7) ? state_names[ice_state] : "unknown";
+
+    LOG("ICE-STATE", peer->viewer_id_ << " ICE connection state: " << state_name << " (" << ice_state << ")");
+
+    // Log when connection is established or fails
+    if (ice_state == 2) { // connected
+        LOG("ICE-STATE", peer->viewer_id_ << " >>> ICE CONNECTED - data should flow now <<<");
+    } else if (ice_state == 3) { // completed
+        LOG("ICE-STATE", peer->viewer_id_ << " >>> ICE COMPLETED - all candidates checked <<<");
+    } else if (ice_state == 4) { // failed
+        LOG("ICE-STATE", peer->viewer_id_ << " >>> ICE FAILED - connection could not be established <<<");
+    }
+}
+
+// WebRTC connection state callback
+void WebRTCPeer::onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    guint conn_state;
+    g_object_get(webrtc, "connection-state", &conn_state, nullptr);
+
+    const char* state_names[] = {
+        "new", "connecting", "connected", "disconnected", "failed", "closed"
+    };
+    const char* state_name = (conn_state < 6) ? state_names[conn_state] : "unknown";
+
+    LOG("CONN-STATE", peer->viewer_id_ << " connection state: " << state_name << " (" << conn_state << ")");
 }
 
 void WebRTCPeer::setIceCandidateCallback(
