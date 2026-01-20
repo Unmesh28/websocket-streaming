@@ -848,50 +848,55 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         }
     }
 
-    // STEP 4: Send EOS to queues to flush any pending data
-    LOG("PEER", "Sending EOS to flush queues...");
-    if (video_queue_) {
-        GstPad* queue_sink = gst_element_get_static_pad(video_queue_, "sink");
-        if (queue_sink) {
-            gst_pad_send_event(queue_sink, gst_event_new_eos());
-            gst_object_unref(queue_sink);
-        }
-    }
-    if (audio_queue_) {
-        GstPad* queue_sink = gst_element_get_static_pad(audio_queue_, "sink");
-        if (queue_sink) {
-            gst_pad_send_event(queue_sink, gst_event_new_eos());
-            gst_object_unref(queue_sink);
+    // STEP 4: Lock all element states to prevent pipeline from managing them
+    // This is CRITICAL - without this, state changes can block waiting for pipeline
+    LOG("PEER", "Locking element states...");
+    if (video_queue_) gst_element_set_locked_state(video_queue_, TRUE);
+    if (audio_queue_) gst_element_set_locked_state(audio_queue_, TRUE);
+    if (webrtcbin_) gst_element_set_locked_state(webrtcbin_, TRUE);
+
+    // STEP 5: Set elements to NULL state - DOWNSTREAM FIRST (webrtcbin), then upstream (queues)
+    // This order prevents blocking: downstream elements must be stopped before upstream
+    // Use timeout to avoid infinite blocking if ICE agent is stuck
+    LOG("PEER", "Setting webrtcbin to NULL (with 2s timeout)...");
+    if (webrtcbin_) {
+        gst_element_set_state(webrtcbin_, GST_STATE_NULL);
+        // Wait with timeout - don't block forever if ICE is stuck
+        GstState state, pending;
+        GstStateChangeReturn ret = gst_element_get_state(webrtcbin_, &state, &pending, 2 * GST_SECOND);
+        if (ret == GST_STATE_CHANGE_ASYNC) {
+            LOG("PEER-WARN", "webrtcbin state change timed out - proceeding anyway");
+        } else if (ret == GST_STATE_CHANGE_FAILURE) {
+            LOG("PEER-WARN", "webrtcbin state change failed - proceeding anyway");
+        } else {
+            LOG("PEER", "webrtcbin state change completed");
         }
     }
 
-    // STEP 5: Set elements to NULL state BEFORE removing from bin
-    // This is the critical order per GStreamer documentation
-    LOG("PEER", "Setting elements to NULL state...");
+    LOG("PEER", "Setting queues to NULL...");
     if (video_queue_) {
         gst_element_set_state(video_queue_, GST_STATE_NULL);
+        GstState state, pending;
+        gst_element_get_state(video_queue_, &state, &pending, 500 * GST_MSECOND);
     }
     if (audio_queue_) {
         gst_element_set_state(audio_queue_, GST_STATE_NULL);
-    }
-    if (webrtcbin_) {
-        LOG("PEER", "Setting webrtcbin to NULL (triggers ICE cleanup)...");
-        gst_element_set_state(webrtcbin_, GST_STATE_NULL);
+        GstState state, pending;
+        gst_element_get_state(audio_queue_, &state, &pending, 500 * GST_MSECOND);
     }
 
-    // STEP 6: Run GLib main loop for TURN cleanup IMMEDIATELY after NULL state
+    // STEP 6: Run GLib main loop for TURN cleanup
     // libnice uses async operations that need main loop iterations to complete
-    // This MUST happen BEFORE removing from bin to avoid use-after-free crashes
-    LOG("PEER", "Running main loop for TURN cleanup (1500ms)...");
+    LOG("PEER", "Running main loop for TURN cleanup (500ms)...");
     GMainContext* context = g_main_context_default();
-    gint64 turn_end_time = g_get_monotonic_time() + 1500000;  // 1500ms for TURN cleanup
+    gint64 turn_end_time = g_get_monotonic_time() + 500000;  // 500ms for TURN cleanup
     while (g_get_monotonic_time() < turn_end_time) {
         g_main_context_iteration(context, FALSE);
         g_usleep(5000);  // 5ms between iterations
     }
     LOG("PEER", "TURN cleanup main loop complete");
 
-    // STEP 7: Release request pads from tee AFTER TURN cleanup
+    // STEP 7: Release request pads
     LOG("PEER", "Releasing request pads...");
     if (video_tee_pad_ && video_tee_) {
         gst_element_release_request_pad(video_tee_, video_tee_pad_);
@@ -904,28 +909,41 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         audio_tee_pad_ = nullptr;
     }
 
-    // Release webrtcbin sink pads
-    if (webrtc_video_sink_ && webrtcbin_) {
-        gst_element_release_request_pad(webrtcbin_, webrtc_video_sink_);
+    // Release webrtcbin sink pads (only if webrtcbin still exists)
+    if (webrtc_video_sink_) {
+        if (webrtcbin_ && GST_IS_ELEMENT(webrtcbin_)) {
+            gst_element_release_request_pad(webrtcbin_, webrtc_video_sink_);
+        }
         gst_object_unref(webrtc_video_sink_);
         webrtc_video_sink_ = nullptr;
     }
-    if (webrtc_audio_sink_ && webrtcbin_) {
-        gst_element_release_request_pad(webrtcbin_, webrtc_audio_sink_);
+    if (webrtc_audio_sink_) {
+        if (webrtcbin_ && GST_IS_ELEMENT(webrtcbin_)) {
+            gst_element_release_request_pad(webrtcbin_, webrtc_audio_sink_);
+        }
         gst_object_unref(webrtc_audio_sink_);
         webrtc_audio_sink_ = nullptr;
     }
 
-    // STEP 8: Remove elements from pipeline bin
-    // CRITICAL: gst_bin_remove() DOES unref the element (since gst_bin_add sank the floating ref)
-    // DO NOT call gst_object_unref() after gst_bin_remove() - that causes DOUBLE-FREE crash!
-    LOG("PEER", "Removing elements from pipeline...");
+    // STEP 8: Remove elements from pipeline bin - DOWNSTREAM FIRST
+    // CRITICAL: gst_bin_remove() DOES unref the element (gst_bin_add sank the floating ref)
+    // DO NOT call gst_object_unref() after gst_bin_remove() - that causes DOUBLE-FREE!
+    LOG("PEER", "Removing elements from pipeline (downstream first)...");
 
+    // Remove webrtcbin first (downstream)
+    if (webrtcbin_ && GST_IS_ELEMENT(webrtcbin_)) {
+        GstElement* parent = GST_ELEMENT_PARENT(webrtcbin_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
+        }
+    }
+    webrtcbin_ = nullptr;
+
+    // Then remove queues (upstream)
     if (video_queue_ && GST_IS_ELEMENT(video_queue_)) {
         GstElement* parent = GST_ELEMENT_PARENT(video_queue_);
         if (parent == pipeline_) {
             gst_bin_remove(GST_BIN(pipeline_), video_queue_);
-            // Element is freed by bin_remove - DO NOT touch video_queue_ after this!
         }
     }
     video_queue_ = nullptr;
@@ -937,14 +955,6 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         }
     }
     audio_queue_ = nullptr;
-
-    if (webrtcbin_ && GST_IS_ELEMENT(webrtcbin_)) {
-        GstElement* parent = GST_ELEMENT_PARENT(webrtcbin_);
-        if (parent == pipeline_) {
-            gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
-        }
-    }
-    webrtcbin_ = nullptr;
 
     LOG("PEER", "Cleanup operations complete for: " << viewer_id_);
 }
