@@ -897,65 +897,46 @@ void WebRTCPeer::cleanup() {
     }
 
     // NOW set elements to NULL state (after unlinking)
-    // CRITICAL: Must wait for state change to complete to allow libnice to cleanup TURN
+    // Use locked state and non-blocking approach to prevent cleanup from hanging
     LOG("PEER", "Setting elements to NULL state...");
 
-    // First, send flush events to queues to clear any pending data
-    // This prevents blocking when setting to NULL with full queues (when ICE never connected)
+    // Lock states to prevent any blocking during cleanup
     if (video_queue_) {
-        GstPad* sink = gst_element_get_static_pad(video_queue_, "sink");
-        if (sink) {
-            gst_pad_send_event(sink, gst_event_new_flush_start());
-            gst_pad_send_event(sink, gst_event_new_flush_stop(FALSE));
-            gst_object_unref(sink);
-        }
-        LOG("PEER", "Flushed video queue");
-    }
-    if (audio_queue_) {
-        GstPad* sink = gst_element_get_static_pad(audio_queue_, "sink");
-        if (sink) {
-            gst_pad_send_event(sink, gst_event_new_flush_start());
-            gst_pad_send_event(sink, gst_event_new_flush_stop(FALSE));
-            gst_object_unref(sink);
-        }
-        LOG("PEER", "Flushed audio queue");
-    }
-
-    // Set queues to NULL with timeout (don't block forever if queues are stuck)
-    if (video_queue_) {
+        gst_element_set_locked_state(video_queue_, TRUE);
         gst_element_set_state(video_queue_, GST_STATE_NULL);
-        GstStateChangeReturn ret = gst_element_get_state(video_queue_, nullptr, nullptr, 500 * GST_MSECOND);
-        if (ret != GST_STATE_CHANGE_SUCCESS) {
-            LOG("PEER-WARN", "video_queue state change timeout, continuing anyway");
-        }
+        LOG("PEER", "video_queue set to NULL (locked)");
     }
     if (audio_queue_) {
+        gst_element_set_locked_state(audio_queue_, TRUE);
         gst_element_set_state(audio_queue_, GST_STATE_NULL);
-        GstStateChangeReturn ret = gst_element_get_state(audio_queue_, nullptr, nullptr, 500 * GST_MSECOND);
-        if (ret != GST_STATE_CHANGE_SUCCESS) {
-            LOG("PEER-WARN", "audio_queue state change timeout, continuing anyway");
-        }
+        LOG("PEER", "audio_queue set to NULL (locked)");
     }
 
     // webrtcbin cleanup - this is the critical one with ICE agent
     if (webrtcbin_) {
         LOG("PEER", "Setting webrtcbin to NULL (this triggers ICE/TURN cleanup)...");
+        gst_element_set_locked_state(webrtcbin_, TRUE);
         gst_element_set_state(webrtcbin_, GST_STATE_NULL);
-        // Wait up to 2 seconds for webrtcbin to fully cleanup (includes ICE agent)
-        GstStateChangeReturn ret = gst_element_get_state(webrtcbin_, nullptr, nullptr, 2 * GST_SECOND);
+
+        // Wait briefly for webrtcbin, but don't block forever
+        GstStateChangeReturn ret = gst_element_get_state(webrtcbin_, nullptr, nullptr, 500 * GST_MSECOND);
         if (ret == GST_STATE_CHANGE_SUCCESS) {
-            LOG("PEER", "webrtcbin state change to NULL completed successfully");
-        } else if (ret == GST_STATE_CHANGE_ASYNC) {
-            LOG("PEER-WARN", "webrtcbin state change still pending after 2s");
+            LOG("PEER", "webrtcbin state change to NULL completed");
         } else {
-            LOG("PEER-WARN", "webrtcbin state change returned: " << ret);
+            LOG("PEER-WARN", "webrtcbin state change returned: " << ret << " (continuing anyway)");
         }
     }
 
-    // Longer delay to let libnice finish TURN refresh cleanup
-    // The warning about "alive TURN refreshes" indicates we need more time
-    LOG("PEER", "Delay for ICE agent cleanup (300ms)...");
-    g_usleep(300000);  // 300ms - increased from 100ms
+    // Run GLib main loop iterations to let libnice TURN refresh timers fire and cleanup
+    // This is critical - just sleeping doesn't help because libnice uses the main loop
+    LOG("PEER", "Running main loop for TURN cleanup (500ms)...");
+    GMainContext* context = g_main_context_default();
+    gint64 end_time = g_get_monotonic_time() + 500000;  // 500ms
+    while (g_get_monotonic_time() < end_time) {
+        g_main_context_iteration(context, FALSE);
+        g_usleep(10000);  // 10ms between iterations
+    }
+    LOG("PEER", "Main loop cleanup complete");
 
     // Remove elements from pipeline
     LOG("PEER", "Removing elements from pipeline...");
