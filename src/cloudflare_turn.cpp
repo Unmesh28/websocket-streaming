@@ -225,16 +225,20 @@ bool CloudflareTurn::parseResponse(const std::string& json_response) {
         return false;
     }
 
-    // Response format:
+    // Response format from Cloudflare:
     // {
     //   "iceServers": [
     //     {
-    //       "urls": ["stun:...", "turn:...", "turns:..."],
+    //       "urls": ["stun:stun.cloudflare.com:3478"]  // STUN only - no credentials
+    //     },
+    //     {
+    //       "urls": ["turn:turn.cloudflare.com:3478?transport=udp", ...],
     //       "username": "xxx",
     //       "credential": "yyy"
     //     }
     //   ]
     // }
+    // Note: Cloudflare returns STUN and TURN in SEPARATE entries!
 
     if (!root.isMember("iceServers") || !root["iceServers"].isArray() ||
         root["iceServers"].empty()) {
@@ -243,17 +247,27 @@ bool CloudflareTurn::parseResponse(const std::string& json_response) {
         return false;
     }
 
-    const Json::Value& ice_server = root["iceServers"][0];
+    // Find the iceServer entry that has TURN credentials (not all entries have them)
+    const Json::Value* turn_server = nullptr;
+    for (const auto& server : root["iceServers"]) {
+        if (server.isMember("username") && server.isMember("credential")) {
+            turn_server = &server;
+            break;
+        }
+    }
 
-    if (!ice_server.isMember("username") || !ice_server.isMember("credential")) {
-        std::cerr << "[CLOUDFLARE] Missing username/credential in response" << std::endl;
+    if (!turn_server) {
+        std::cerr << "[CLOUDFLARE] No TURN server with credentials found in response" << std::endl;
+        std::cerr << "[CLOUDFLARE] Response: " << json_response << std::endl;
         return false;
     }
+
+    const Json::Value& ice_server = *turn_server;
 
     credentials_.username = ice_server["username"].asString();
     credentials_.password = ice_server["credential"].asString();
 
-    // Extract URLs
+    // Extract URLs from the TURN server entry
     if (ice_server.isMember("urls") && ice_server["urls"].isArray()) {
         for (const auto& url : ice_server["urls"]) {
             std::string url_str = url.asString();
