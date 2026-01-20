@@ -319,50 +319,46 @@ class WebRTCService extends ChangeNotifier {
       }
 
       final iceServers = _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}];
-      debugPrint('[WebRTC] Using ${iceServers.length} ICE servers');
+      debugPrint('[WebRTC] Using ${iceServers.length} ICE servers:');
+      for (var server in iceServers) {
+        debugPrint('[WebRTC]   - ${server['urls']}');
+      }
 
       final config = <String, dynamic>{
         'iceServers': iceServers,
         'sdpSemantics': 'unified-plan',
         'iceTransportPolicy': 'all',
+        'bundlePolicy': 'max-bundle',
+        'rtcpMuxPolicy': 'require',
       };
 
-      debugPrint('[WebRTC] Creating peer connection with config: $config');
+      debugPrint('[WebRTC] Creating peer connection...');
       _peerConnection = await createPeerConnection(config);
-      debugPrint('[WebRTC] Peer connection created');
+      debugPrint('[WebRTC] Peer connection created: $_peerConnection');
 
-      // Set up handlers BEFORE setting remote description
+      // Set up handlers BEFORE any other operations
       _setupPeerConnectionHandlers();
 
-      // Add receive-only transceivers for audio and video
-      // This ensures we're ready to receive media
-      debugPrint('[WebRTC] Adding receive-only transceivers');
-      await _peerConnection!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-      );
-      await _peerConnection!.addTransceiver(
-        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-      );
-      debugPrint('[WebRTC] Transceivers added');
-
-      // Set remote description (offer)
+      // Set remote description (offer) FIRST
+      // This triggers track events and ICE gathering
       debugPrint('[WebRTC] Setting remote description (offer)');
       final offer = RTCSessionDescription(data['sdp'] as String, 'offer');
       await _peerConnection!.setRemoteDescription(offer);
       _remoteDescriptionSet = true;
       debugPrint('[WebRTC] Remote description set successfully');
 
-      // Process any queued ICE candidates
+      // Process any queued ICE candidates from server
       await _processQueuedIceCandidates();
 
       // Create and set local description (answer)
-      debugPrint('[WebRTC] Creating answer');
+      // This triggers local ICE gathering
+      debugPrint('[WebRTC] Creating answer...');
       final answer = await _peerConnection!.createAnswer();
-      debugPrint('[WebRTC] Setting local description (answer)');
+      debugPrint('[WebRTC] Answer created, SDP length: ${answer.sdp?.length}');
+
+      debugPrint('[WebRTC] Setting local description (answer)...');
       await _peerConnection!.setLocalDescription(answer);
-      debugPrint('[WebRTC] Local description set');
+      debugPrint('[WebRTC] Local description set - ICE gathering should start now');
 
       // Send answer to server
       debugPrint('[WebRTC] Sending answer to broadcaster');
@@ -374,6 +370,11 @@ class WebRTCService extends ChangeNotifier {
 
       _updateState(StreamState.connecting, 'Establishing connection...');
       debugPrint('[WebRTC] Offer handling complete, waiting for ICE connection...');
+
+      // Log current ICE state after setup
+      final iceState = await _peerConnection?.getIceConnectionState();
+      final gatherState = await _peerConnection?.getIceGatheringState();
+      debugPrint('[WebRTC] Current ICE state: $iceState, Gathering: $gatherState');
 
     } catch (e, stackTrace) {
       debugPrint('[WebRTC] Failed to handle offer: $e');
