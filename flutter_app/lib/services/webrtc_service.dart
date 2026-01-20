@@ -345,8 +345,26 @@ class WebRTCService extends ChangeNotifier {
       // Set up handlers BEFORE any other operations
       _setupPeerConnectionHandlers();
 
-      // Set remote description (offer) FIRST
-      // This triggers track events and ICE gathering
+      // Add transceivers BEFORE setting remote description
+      // This tells WebRTC we want to receive video and audio
+      debugPrint('[WebRTC] Adding receive-only transceivers...');
+      try {
+        await _peerConnection!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        debugPrint('[WebRTC] Video transceiver added');
+
+        await _peerConnection!.addTransceiver(
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        );
+        debugPrint('[WebRTC] Audio transceiver added');
+      } catch (e) {
+        debugPrint('[WebRTC] Warning: Could not add transceivers: $e');
+      }
+
+      // Set remote description (offer)
       debugPrint('[WebRTC] Setting remote description (offer)');
       final sdpStr = data['sdp'] as String;
       _logSdpInfo('OFFER', sdpStr);
@@ -358,17 +376,24 @@ class WebRTCService extends ChangeNotifier {
       // Process any queued ICE candidates from server
       await _processQueuedIceCandidates();
 
-      // Create and set local description (answer)
-      // This triggers local ICE gathering
+      // Create answer
       debugPrint('[WebRTC] Creating answer...');
       final answer = await _peerConnection!.createAnswer();
       debugPrint('[WebRTC] Answer created, SDP length: ${answer.sdp?.length}');
-      if (answer.sdp != null) {
-        _logSdpInfo('ANSWER', answer.sdp!);
+
+      // Check if video section was rejected (port 0) and fix it
+      String fixedSdp = answer.sdp ?? '';
+      if (fixedSdp.contains('m=video 0 ')) {
+        debugPrint('[WebRTC] WARNING: Video section rejected in answer, attempting to fix...');
+        fixedSdp = _fixRejectedVideoInSdp(fixedSdp, sdpStr);
       }
 
+      _logSdpInfo('ANSWER', fixedSdp);
+
       debugPrint('[WebRTC] Setting local description (answer)...');
-      await _peerConnection!.setLocalDescription(answer);
+      await _peerConnection!.setLocalDescription(
+        RTCSessionDescription(fixedSdp, 'answer'),
+      );
       debugPrint('[WebRTC] Local description set - ICE gathering should start now');
 
       // Send answer to server
@@ -376,7 +401,7 @@ class WebRTCService extends ChangeNotifier {
       _send({
         'type': 'answer',
         'to': _broadcasterId,
-        'sdp': answer.sdp,
+        'sdp': fixedSdp,
       });
 
       _updateState(StreamState.connecting, 'Establishing connection...');
@@ -395,6 +420,57 @@ class WebRTCService extends ChangeNotifier {
       debugPrint('[WebRTC] Stack trace: $stackTrace');
       _updateState(StreamState.failed, 'Setup failed: $e');
     }
+  }
+
+  /// Fix rejected video section in SDP answer
+  /// When Flutter WebRTC doesn't support H264, it rejects video with port 0
+  String _fixRejectedVideoInSdp(String answerSdp, String offerSdp) {
+    debugPrint('[WebRTC] Attempting to fix rejected video in SDP...');
+
+    // Extract video codec info from offer
+    final videoPayloadMatch = RegExp(r'm=video \d+ UDP/TLS/RTP/SAVPF (\d+)').firstMatch(offerSdp);
+    if (videoPayloadMatch == null) {
+      debugPrint('[WebRTC] Could not extract video payload from offer');
+      return answerSdp;
+    }
+    final payloadType = videoPayloadMatch.group(1)!;
+    debugPrint('[WebRTC] Offer video payload type: $payloadType');
+
+    // Get the rtpmap line from offer
+    final rtpmapMatch = RegExp('a=rtpmap:$payloadType ([^\r\n]+)').firstMatch(offerSdp);
+    final rtpmapLine = rtpmapMatch != null ? 'a=rtpmap:$payloadType ${rtpmapMatch.group(1)}' : 'a=rtpmap:$payloadType H264/90000';
+
+    // Fix the BUNDLE group to include video0
+    String fixedSdp = answerSdp;
+    if (!fixedSdp.contains('BUNDLE video0')) {
+      fixedSdp = fixedSdp.replaceFirst(
+        RegExp(r'a=group:BUNDLE ([^\r\n]+)'),
+        'a=group:BUNDLE video0 \$1',
+      );
+      debugPrint('[WebRTC] Fixed BUNDLE group to include video0');
+    }
+
+    // Fix the video m-line (change port 0 to 9, fix payload type)
+    fixedSdp = fixedSdp.replaceFirst(
+      RegExp(r'm=video 0 UDP/TLS/RTP/SAVPF \d+'),
+      'm=video 9 UDP/TLS/RTP/SAVPF $payloadType',
+    );
+
+    // Ensure proper rtpmap line exists for the video codec
+    if (!fixedSdp.contains('a=rtpmap:$payloadType')) {
+      // Add rtpmap after the video m-line section's mid
+      fixedSdp = fixedSdp.replaceFirst(
+        'a=mid:video0\r\n',
+        'a=mid:video0\r\n$rtpmapLine\r\n',
+      );
+      fixedSdp = fixedSdp.replaceFirst(
+        'a=mid:video0\n',
+        'a=mid:video0\n$rtpmapLine\n',
+      );
+    }
+
+    debugPrint('[WebRTC] SDP video section fixed');
+    return fixedSdp;
   }
 
   void _setupPeerConnectionHandlers() {
