@@ -59,7 +59,7 @@ class WebRTCService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> connect(String serverUrl, {String streamId = 'pi-camera'}) async {
+  Future<void> connect(String serverUrl, {String streamId = 'pi-camera-stream'}) async {
     if (_connectionState == StreamState.connecting) return;
 
     _currentUrl = serverUrl;
@@ -320,7 +320,7 @@ class WebRTCService extends ChangeNotifier {
 
     await _cleanup();
     await Future.delayed(const Duration(milliseconds: 500));
-    await connect(_currentUrl!, streamId: _currentStreamId ?? 'pi-camera');
+    await connect(_currentUrl!, streamId: _currentStreamId ?? 'pi-camera-stream');
   }
 
   Future<void> _cleanup() async {
