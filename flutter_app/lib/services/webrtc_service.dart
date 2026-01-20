@@ -212,20 +212,29 @@ class WebRTCService extends ChangeNotifier {
       _peerConnection!.onIceConnectionState = (state) {
         final stateStr = state.toString().split('.').last;
         _updateIceState(stateStr);
-        debugPrint('[WebRTC] ICE state: $stateStr');
+        debugPrint('[WebRTC] ====== ICE CONNECTION STATE: $stateStr ======');
 
         if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
             state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+          debugPrint('[WebRTC] *** SUCCESS: CONNECTION ESTABLISHED ***');
           _updateState(StreamState.connected, 'Connected');
         } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+          debugPrint('[WebRTC] *** FAILED: ICE CONNECTION FAILED ***');
           _updateState(StreamState.failed, 'ICE connection failed');
         } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+          debugPrint('[WebRTC] *** DISCONNECTED ***');
           _updateState(StreamState.disconnected, 'Disconnected');
+        } else if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
+          debugPrint('[WebRTC] Checking ICE connectivity...');
+        } else if (state == RTCIceConnectionState.RTCIceConnectionStateNew) {
+          debugPrint('[WebRTC] ICE state is new, waiting for candidates...');
         }
       };
 
       _peerConnection!.onIceCandidate = (candidate) {
+        debugPrint('[WebRTC] Local ICE candidate generated: ${candidate.candidate?.substring(0, 50) ?? "null"}...');
         if (candidate.candidate != null && _broadcasterId != null) {
+          debugPrint('[WebRTC] Sending ICE candidate to $_broadcasterId');
           _send({
             'type': 'ice-candidate',
             'to': _broadcasterId,
@@ -236,11 +245,23 @@ class WebRTCService extends ChangeNotifier {
         }
       };
 
+      _peerConnection!.onIceGatheringState = (state) {
+        debugPrint('[WebRTC] ICE gathering state: $state');
+      };
+
+      _peerConnection!.onConnectionState = (state) {
+        debugPrint('[WebRTC] Peer connection state: $state');
+      };
+
       _peerConnection!.onTrack = (event) {
-        debugPrint('[WebRTC] Got remote track: ${event.track.kind}');
+        debugPrint('[WebRTC] Got remote track: ${event.track.kind}, enabled: ${event.track.enabled}');
+        debugPrint('[WebRTC] Track ID: ${event.track.id}, streams: ${event.streams.length}');
         if (event.streams.isNotEmpty) {
+          debugPrint('[WebRTC] Setting remote stream with ${event.streams[0].getTracks().length} tracks');
           _remoteRenderer.srcObject = event.streams[0];
           notifyListeners();
+        } else {
+          debugPrint('[WebRTC] WARNING: No streams in track event!');
         }
       };
 
