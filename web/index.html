@@ -294,6 +294,7 @@
         let ws = null;
         let pc = null;
         let viewerId = null;
+        let iceServers = null; // Will be fetched from server
 
         const video = document.getElementById('video');
         const statusEl = document.getElementById('status');
@@ -363,6 +364,24 @@
                 updateStatus('Connecting...');
                 errorBox.style.display = 'none';
                 connectBtn.disabled = true;
+
+                // Fetch TURN credentials from server first
+                log('TURN', 'Fetching TURN credentials...');
+                try {
+                    const httpUrl = serverUrl.replace('wss://', 'https://').replace('ws://', 'http://');
+                    const turnResponse = await fetch(`${httpUrl}/turn-credentials`);
+                    if (turnResponse.ok) {
+                        const turnData = await turnResponse.json();
+                        iceServers = turnData.iceServers;
+                        log('TURN', `Got ${iceServers.length} ICE servers including TURN`);
+                    } else {
+                        log('TURN', 'Could not fetch TURN credentials, using STUN only');
+                        iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+                    }
+                } catch (e) {
+                    log('TURN', `TURN fetch error: ${e.message}, using STUN only`);
+                    iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+                }
 
                 // Connect to signaling server
                 ws = new WebSocket(serverUrl);
@@ -434,12 +453,12 @@
         async function handleOffer(sdp) {
             log('WEBRTC', 'Creating RTCPeerConnection');
 
+            // Use fetched ICE servers (includes TURN for NAT traversal)
+            const config = { iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }] };
+            log('WEBRTC', `Using ${config.iceServers.length} ICE servers`);
+
             // Create peer connection
-            pc = new RTCPeerConnection({
-                iceServers: [{
-                    urls: 'stun:stun.l.google.com:19302'
-                }]
-            });
+            pc = new RTCPeerConnection(config);
 
             // Handle incoming stream
             pc.ontrack = (event) => {

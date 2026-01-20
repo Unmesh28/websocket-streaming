@@ -2,10 +2,38 @@ const WebSocket = require('ws');
 const http = require('http');
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
+// Cloudflare TURN credentials (same as used by the streamer)
+const TURN_KEY_ID = process.env.TURN_KEY_ID || '5765757461f633c76e862dd0f39d2c9191bc46e9084dd8a498730540ac7b7737';
+const TURN_API_TOKEN = process.env.TURN_API_TOKEN || 'fa9d64c8fbdd51a8df17e1156b42ccf81c56b23d0e24e1ed353a762a062e614e';
+
+// Generate Cloudflare TURN credentials
+function generateTurnCredentials() {
+    // Cloudflare TURN uses time-limited credentials
+    // Format: username = <expiry_timestamp>:<key_id>
+    // password = base64(HMAC-SHA256(<api_token>, <username>))
+
+    const expiryTime = Math.floor(Date.now() / 1000) + 86400; // 24 hours
+    const username = `${expiryTime}:${TURN_KEY_ID}`;
+    const hmac = crypto.createHmac('sha256', TURN_API_TOKEN);
+    hmac.update(username);
+    const password = hmac.digest('base64');
+
+    return {
+        urls: [
+            'turn:turn.cloudflare.com:3478?transport=udp',
+            'turn:turn.cloudflare.com:3478?transport=tcp',
+            'turns:turn.cloudflare.com:5349?transport=tcp'
+        ],
+        username: username,
+        credential: password
+    };
+}
 
 // Serve static files (HTML viewer)
 app.use(express.static(path.join(__dirname, '../web')));
@@ -357,6 +385,19 @@ app.get('/status', (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// TURN credentials endpoint - browsers need this for NAT traversal
+app.get('/turn-credentials', (req, res) => {
+    const creds = generateTurnCredentials();
+    console.log('[TURN] Generated credentials for browser client');
+    res.json({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            creds
+        ]
+    });
 });
 
 console.log('Starting signaling server...');
