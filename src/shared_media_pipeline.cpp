@@ -879,7 +879,19 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         gst_element_set_state(webrtcbin_, GST_STATE_NULL);
     }
 
-    // STEP 6: Release request pads from tee AFTER state is NULL
+    // STEP 6: Run GLib main loop for TURN cleanup IMMEDIATELY after NULL state
+    // libnice uses async operations that need main loop iterations to complete
+    // This MUST happen BEFORE removing from bin to avoid use-after-free crashes
+    LOG("PEER", "Running main loop for TURN cleanup (1500ms)...");
+    GMainContext* context = g_main_context_default();
+    gint64 turn_end_time = g_get_monotonic_time() + 1500000;  // 1500ms for TURN cleanup
+    while (g_get_monotonic_time() < turn_end_time) {
+        g_main_context_iteration(context, FALSE);
+        g_usleep(5000);  // 5ms between iterations
+    }
+    LOG("PEER", "TURN cleanup main loop complete");
+
+    // STEP 7: Release request pads from tee AFTER TURN cleanup
     LOG("PEER", "Releasing request pads...");
     if (video_tee_pad_ && video_tee_) {
         gst_element_release_request_pad(video_tee_, video_tee_pad_);
@@ -904,36 +916,35 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         webrtc_audio_sink_ = nullptr;
     }
 
-    // STEP 7: Remove elements from pipeline bin
+    // STEP 8: Remove elements from pipeline bin
+    // CRITICAL: gst_bin_remove() DOES unref the element (since gst_bin_add sank the floating ref)
+    // DO NOT call gst_object_unref() after gst_bin_remove() - that causes DOUBLE-FREE crash!
     LOG("PEER", "Removing elements from pipeline...");
-    GstElement* vq = video_queue_;
-    GstElement* aq = audio_queue_;
-    GstElement* wb = webrtcbin_;
 
-    if (vq && GST_IS_ELEMENT(vq) && GST_ELEMENT_PARENT(vq) == pipeline_) {
-        gst_bin_remove(GST_BIN(pipeline_), vq);
-        video_queue_ = nullptr;
+    if (video_queue_ && GST_IS_ELEMENT(video_queue_)) {
+        GstElement* parent = GST_ELEMENT_PARENT(video_queue_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), video_queue_);
+            // Element is freed by bin_remove - DO NOT touch video_queue_ after this!
+        }
     }
-    if (aq && GST_IS_ELEMENT(aq) && GST_ELEMENT_PARENT(aq) == pipeline_) {
-        gst_bin_remove(GST_BIN(pipeline_), aq);
-        audio_queue_ = nullptr;
-    }
-    if (wb && GST_IS_ELEMENT(wb) && GST_ELEMENT_PARENT(wb) == pipeline_) {
-        gst_bin_remove(GST_BIN(pipeline_), wb);
-        webrtcbin_ = nullptr;
-    }
+    video_queue_ = nullptr;
 
-    // STEP 8: Unref elements (gst_bin_remove doesn't unref)
-    LOG("PEER", "Unreferencing elements...");
-    if (vq) {
-        gst_object_unref(vq);
+    if (audio_queue_ && GST_IS_ELEMENT(audio_queue_)) {
+        GstElement* parent = GST_ELEMENT_PARENT(audio_queue_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), audio_queue_);
+        }
     }
-    if (aq) {
-        gst_object_unref(aq);
+    audio_queue_ = nullptr;
+
+    if (webrtcbin_ && GST_IS_ELEMENT(webrtcbin_)) {
+        GstElement* parent = GST_ELEMENT_PARENT(webrtcbin_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
+        }
     }
-    if (wb) {
-        gst_object_unref(wb);
-    }
+    webrtcbin_ = nullptr;
 
     LOG("PEER", "Cleanup operations complete for: " << viewer_id_);
 }
@@ -1030,16 +1041,8 @@ void WebRTCPeer::cleanup() {
         }
     }
 
-    // STEP 2: Run GLib main loop for TURN cleanup
-    // libnice uses async operations that need main loop iterations
-    LOG("PEER", "Running main loop for TURN cleanup (2000ms)...");
-    GMainContext* context = g_main_context_default();
-    gint64 end_time = g_get_monotonic_time() + 2000000;  // 2000ms for thorough cleanup
-    while (g_get_monotonic_time() < end_time) {
-        g_main_context_iteration(context, FALSE);
-        g_usleep(10000);  // 10ms between iterations
-    }
-    LOG("PEER", "Main loop cleanup complete");
+    // Main loop for TURN cleanup is now run inside doCleanupInProbe()
+    // right after setting webrtcbin to NULL state (before removing from bin)
 
     LOG_VAR("PEER", "Peer cleanup complete: ", viewer_id_);
 }
