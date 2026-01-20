@@ -420,6 +420,10 @@ WebRTCPeer::TurnConfig WebRTCPeer::turn_config_;
 bool WebRTCPeer::turn_configured_ = false;
 bool WebRTCPeer::use_cloudflare_turn_ = false;
 
+// Global ICE mutex - CRITICAL for preventing libnice crashes with multiple viewers
+// libnice has internal state machine issues when multiple peers process ICE simultaneously
+std::mutex WebRTCPeer::global_ice_mutex_;
+
 void WebRTCPeer::setTurnServer(const TurnConfig& config) {
     turn_config_ = config;
     turn_configured_ = !config.uri.empty();
@@ -1178,18 +1182,27 @@ void WebRTCPeer::setRemoteAnswer(const std::string& sdp) {
     GstWebRTCSessionDescription* answer =
         gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER, sdp_msg);
 
-    // Set remote description synchronously first
-    GstPromise* promise = gst_promise_new();
-    g_signal_emit_by_name(webrtcbin_, "set-remote-description", answer, promise);
+    // CRITICAL: Use global mutex for SDP operations to prevent libnice race conditions
+    // Setting remote description triggers ICE state machine operations
+    {
+        std::lock_guard<std::mutex> global_lock(global_ice_mutex_);
 
-    // Wait for it to complete with a timeout
-    GstPromiseResult result = gst_promise_wait(promise);
-    gst_promise_unref(promise);
+        // Set remote description synchronously first
+        GstPromise* promise = gst_promise_new();
+        g_signal_emit_by_name(webrtcbin_, "set-remote-description", answer, promise);
 
-    if (result == GST_PROMISE_RESULT_REPLIED) {
-        LOG("PEER", "Remote description set successfully for: " << viewer_id_);
-    } else {
-        LOG("PEER-WARN", "Remote description set with result: " << result << " for: " << viewer_id_);
+        // Wait for it to complete with a timeout
+        GstPromiseResult result = gst_promise_wait(promise);
+        gst_promise_unref(promise);
+
+        if (result == GST_PROMISE_RESULT_REPLIED) {
+            LOG("PEER", "Remote description set successfully for: " << viewer_id_);
+        } else {
+            LOG("PEER-WARN", "Remote description set with result: " << result << " for: " << viewer_id_);
+        }
+
+        // Give libnice time to process the SDP before we start adding ICE candidates
+        g_usleep(50000);  // 50ms delay after setting remote description
     }
 
     gst_webrtc_session_description_free(answer);
@@ -1199,7 +1212,7 @@ void WebRTCPeer::setRemoteAnswer(const std::string& sdp) {
     remote_description_set_.store(true);
     LOG_VAR("PEER", "Remote answer applied for: ", viewer_id_);
 
-    // Now process any queued ICE candidates
+    // Now process any queued ICE candidates (this also acquires global_ice_mutex_)
     processQueuedIceCandidates();
 }
 
@@ -1217,9 +1230,19 @@ void WebRTCPeer::addIceCandidate(const std::string& candidate, int sdp_mline_ind
         return;
     }
 
-    // Remote description is set, add candidate directly
-    LOG("PEER", "Adding ICE candidate for " << viewer_id_ << ", mlineindex: " << sdp_mline_index);
-    g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", sdp_mline_index, candidate.c_str());
+    // CRITICAL: Use global mutex to prevent concurrent ICE operations across peers
+    // This prevents libnice internal state machine crashes
+    {
+        std::lock_guard<std::mutex> global_lock(global_ice_mutex_);
+
+        // Remote description is set, add candidate directly
+        LOG("PEER", "Adding ICE candidate for " << viewer_id_ << ", mlineindex: " << sdp_mline_index);
+        g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", sdp_mline_index, candidate.c_str());
+
+        // Small delay to allow libnice to process this candidate before next one
+        // This prevents race conditions in libnice's connectivity check state machine
+        g_usleep(5000);  // 5ms between candidates
+    }
 }
 
 void WebRTCPeer::processQueuedIceCandidates() {
@@ -1232,12 +1255,20 @@ void WebRTCPeer::processQueuedIceCandidates() {
 
     LOG("PEER", "Processing " << queued_ice_candidates_.size() << " queued ICE candidates for " << viewer_id_);
 
+    // CRITICAL: Use global mutex to serialize ICE operations across all peers
+    // This prevents libnice internal state machine crashes
+    std::lock_guard<std::mutex> global_lock(global_ice_mutex_);
+
     // Process candidates with a small delay between each to avoid overwhelming libnice
     for (size_t i = 0; i < queued_ice_candidates_.size(); i++) {
         const auto& ice = queued_ice_candidates_[i];
         LOG("PEER", "Adding queued ICE candidate " << (i+1) << "/" << queued_ice_candidates_.size()
             << " for " << viewer_id_ << ", mlineindex: " << ice.sdp_mline_index);
         g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", ice.sdp_mline_index, ice.candidate.c_str());
+
+        // Small delay between candidates to allow libnice to process each one
+        // This is critical for preventing race conditions in connectivity checks
+        g_usleep(10000);  // 10ms between queued candidates
     }
 
     LOG("PEER", "Finished processing queued ICE candidates for " << viewer_id_);
