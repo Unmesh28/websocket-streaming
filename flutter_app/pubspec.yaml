@@ -21,6 +21,9 @@ dependencies:
   # HTTP for TURN credentials
   http: ^1.1.0
 
+  # WebView for embedded web viewer
+  webview_flutter: ^4.4.2
+
   # State management
   provider: ^6.1.1
 
