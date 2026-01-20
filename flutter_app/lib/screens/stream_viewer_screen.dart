@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../services/webrtc_service.dart';
 import '../widgets/control_button.dart';
 import '../widgets/connection_status.dart';
+import 'web_viewer_screen.dart';
 
 class StreamViewerScreen extends StatefulWidget {
   const StreamViewerScreen({super.key});
@@ -42,6 +43,25 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
     }
   }
 
+  void _openWebViewer(BuildContext context) {
+    // Get current URL from text field
+    String url = _urlController.text.trim();
+
+    // Ensure URL has https:// prefix
+    if (url.isEmpty) {
+      url = 'https://';
+    } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://$url';
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => WebViewerScreen(initialUrl: url),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -51,6 +71,12 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
               title: const Text('Pi Camera Viewer'),
               backgroundColor: Colors.black87,
               actions: [
+                // Web viewer button
+                IconButton(
+                  icon: const Icon(Icons.language),
+                  onPressed: () => _openWebViewer(context),
+                  tooltip: 'Open Web Viewer',
+                ),
                 IconButton(
                   icon: const Icon(Icons.fullscreen),
                   onPressed: _toggleFullscreen,
@@ -257,6 +283,23 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
                     ),
                   ),
                 ],
+              ),
+
+              const SizedBox(height: 12),
+
+              // Web Viewer button - always enabled
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () => _openWebViewer(context),
+                  icon: const Icon(Icons.language),
+                  label: const Text('Open Web Viewer'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.deepPurple,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                ),
               ),
             ],
           ),
