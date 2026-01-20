@@ -273,11 +273,31 @@ class WebRTCService extends ChangeNotifier {
     if (_peerConnection == null) return;
 
     try {
-      final candidate = RTCIceCandidate(
-        data['candidate'] as String?,
-        data['sdpMid'] as String?,
-        data['sdpMLineIndex'] as int?,
-      );
+      // Handle different ICE candidate formats from server
+      String? candidateStr;
+      String? sdpMid;
+      int? sdpMLineIndex;
+
+      final candidateData = data['candidate'];
+      if (candidateData is String) {
+        // Direct string format
+        candidateStr = candidateData;
+        sdpMid = data['sdpMid'] as String?;
+        sdpMLineIndex = data['sdpMLineIndex'] as int?;
+      } else if (candidateData is Map) {
+        // Object format: {candidate: "...", sdpMid: "...", sdpMLineIndex: 0}
+        candidateStr = candidateData['candidate'] as String?;
+        sdpMid = candidateData['sdpMid'] as String?;
+        sdpMLineIndex = candidateData['sdpMLineIndex'] as int?;
+      }
+
+      // Skip if no valid candidate string
+      if (candidateStr == null || candidateStr.isEmpty) {
+        debugPrint('[WebRTC] Skipping empty ICE candidate');
+        return;
+      }
+
+      final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
       await _peerConnection!.addCandidate(candidate);
       debugPrint('[WebRTC] Added ICE candidate');
     } catch (e) {
