@@ -11,3 +11,7 @@ build/
 *.swp
 *~
 .ngrok_url
+
+# Environment files with secrets
+.env
+.env.local

@@ -18,6 +18,7 @@ pkg_check_modules(GST REQUIRED
 pkg_check_modules(JSON REQUIRED jsoncpp)
 find_package(Boost REQUIRED COMPONENTS system thread)
 find_package(OpenSSL REQUIRED)
+find_package(CURL REQUIRED)
 
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
@@ -25,6 +26,7 @@ include_directories(
     ${JSON_INCLUDE_DIRS}
     ${Boost_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIRS}
 )
 
 link_directories(
@@ -36,6 +38,7 @@ set(SOURCES
     src/main.cpp
     src/shared_media_pipeline.cpp
     src/signaling_client.cpp
+    src/cloudflare_turn.cpp
 )
 
 # Create executable
@@ -46,6 +49,7 @@ target_link_libraries(webrtc_streamer
     ${JSON_LIBRARIES}
     ${Boost_LIBRARIES}
     ${OPENSSL_LIBRARIES}
+    ${CURL_LIBRARIES}
     pthread
 )
 
