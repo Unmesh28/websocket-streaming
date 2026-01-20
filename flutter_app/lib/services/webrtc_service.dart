@@ -50,6 +50,11 @@ class WebRTCService extends ChangeNotifier {
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   bool get isConnected => _connectionState == StreamState.connected;
 
+  // Connection state flags for UI to check
+  bool get isConnecting => _isConnecting;
+  bool get isDisconnecting => _isDisconnecting;
+  bool get isOperationInProgress => _isConnecting || _isDisconnecting;
+
   WebRTCService() {
     _initRenderer();
   }
@@ -506,36 +511,63 @@ class WebRTCService extends ChangeNotifier {
 
   /// Disconnect from stream
   Future<void> disconnect() async {
-    if (_isDisconnecting) return;
+    if (_isDisconnecting) {
+      debugPrint('[WebRTC] Already disconnecting, ignoring');
+      return;
+    }
 
     debugPrint('[WebRTC] Disconnecting...');
     _isDisconnecting = true;
+
+    // Update state first
     _updateState(StreamState.disconnected, 'Disconnected');
 
+    // Perform cleanup
     await _cleanupInternal();
+
+    // Reset all flags
     _isDisconnecting = false;
+    _isConnecting = false; // Reset in case it was stuck
+    debugPrint('[WebRTC] Disconnect complete');
   }
 
-  /// Refresh connection - disconnect and reconnect
+  /// Refresh connection - disconnect and reconnect smoothly
   Future<bool> refresh() async {
-    if (_currentUrl == null) return false;
+    // Guard against refresh while other operations are in progress
+    if (_isConnecting || _isDisconnecting) {
+      debugPrint('[WebRTC] Operation in progress, ignoring refresh');
+      return false;
+    }
+
+    if (_currentUrl == null) {
+      debugPrint('[WebRTC] No URL to refresh, ignoring');
+      return false;
+    }
 
     debugPrint('[WebRTC] Refreshing connection...');
 
+    // Save current settings before disconnect clears them
     final url = _currentUrl!;
     final streamId = _currentStreamId ?? 'pi-camera-stream';
 
+    // Disconnect first
     await disconnect();
-    await Future.delayed(const Duration(milliseconds: 300));
 
-    return connect(url, streamId: streamId);
+    // Small delay to ensure cleanup is complete
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    // Reconnect
+    final result = await connect(url, streamId: streamId);
+    debugPrint('[WebRTC] Refresh complete, connected: $result');
+
+    return result;
   }
 
-  /// Internal cleanup - closes all resources
+  /// Internal cleanup - closes all resources thoroughly
   Future<void> _cleanupInternal() async {
     debugPrint('[WebRTC] Cleaning up...');
 
-    // Cancel WebSocket subscription
+    // Cancel WebSocket subscription first
     await _channelSubscription?.cancel();
     _channelSubscription = null;
 
@@ -547,11 +579,35 @@ class WebRTCService extends ChangeNotifier {
     }
     _channel = null;
 
+    // Stop all tracks explicitly before clearing renderer
+    // This ensures proper resource release
+    if (_remoteStream != null) {
+      debugPrint('[WebRTC] Stopping ${_remoteStream!.getTracks().length} tracks');
+      for (final track in _remoteStream!.getTracks()) {
+        try {
+          track.stop();
+        } catch (e) {
+          debugPrint('[WebRTC] Error stopping track: $e');
+        }
+      }
+    }
+
     // Clear renderer
     if (_remoteRenderer != null) {
       _remoteRenderer!.srcObject = null;
     }
     _remoteStream = null;
+
+    // Remove peer connection event handlers before closing
+    // This prevents callbacks firing on destroyed objects
+    if (_peerConnection != null) {
+      _peerConnection!.onIceConnectionState = null;
+      _peerConnection!.onIceCandidate = null;
+      _peerConnection!.onTrack = null;
+      _peerConnection!.onAddStream = null;
+      _peerConnection!.onConnectionState = null;
+      _peerConnection!.onIceGatheringState = null;
+    }
 
     // Close peer connection
     try {
@@ -566,6 +622,9 @@ class WebRTCService extends ChangeNotifier {
     _broadcasterId = null;
     _remoteDescriptionSet = false;
     _pendingIceCandidates.clear();
+
+    // Small delay to ensure resources are fully released
+    await Future.delayed(const Duration(milliseconds: 100));
 
     debugPrint('[WebRTC] Cleanup complete');
   }
