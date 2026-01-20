@@ -300,20 +300,26 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> _handleOffer(Map<String, dynamic> data) async {
-    if (_isDisconnecting) return;
+    if (_isDisconnecting) {
+      debugPrint('[WebRTC] Ignoring offer - disconnecting');
+      return;
+    }
 
-    debugPrint('[WebRTC] Received offer');
+    debugPrint('[WebRTC] Handling offer from server');
     _broadcasterId = data['from'] as String? ?? _broadcasterId;
+    debugPrint('[WebRTC] Broadcaster ID: $_broadcasterId');
     _updateState(StreamState.connecting, 'Setting up connection...');
 
     try {
       // Close existing peer connection if any
       if (_peerConnection != null) {
+        debugPrint('[WebRTC] Closing existing peer connection');
         await _peerConnection!.close();
         _peerConnection = null;
       }
 
       final iceServers = _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}];
+      debugPrint('[WebRTC] Using ${iceServers.length} ICE servers');
 
       final config = <String, dynamic>{
         'iceServers': iceServers,
@@ -321,26 +327,45 @@ class WebRTCService extends ChangeNotifier {
         'iceTransportPolicy': 'all',
       };
 
+      debugPrint('[WebRTC] Creating peer connection with config: $config');
       _peerConnection = await createPeerConnection(config);
       debugPrint('[WebRTC] Peer connection created');
 
-      // Set up handlers
+      // Set up handlers BEFORE setting remote description
       _setupPeerConnectionHandlers();
 
-      // Set remote description
+      // Add receive-only transceivers for audio and video
+      // This ensures we're ready to receive media
+      debugPrint('[WebRTC] Adding receive-only transceivers');
+      await _peerConnection!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
+      await _peerConnection!.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
+      debugPrint('[WebRTC] Transceivers added');
+
+      // Set remote description (offer)
+      debugPrint('[WebRTC] Setting remote description (offer)');
       final offer = RTCSessionDescription(data['sdp'] as String, 'offer');
       await _peerConnection!.setRemoteDescription(offer);
       _remoteDescriptionSet = true;
-      debugPrint('[WebRTC] Remote description set');
+      debugPrint('[WebRTC] Remote description set successfully');
 
-      // Process queued candidates
+      // Process any queued ICE candidates
       await _processQueuedIceCandidates();
 
-      // Create answer
+      // Create and set local description (answer)
+      debugPrint('[WebRTC] Creating answer');
       final answer = await _peerConnection!.createAnswer();
+      debugPrint('[WebRTC] Setting local description (answer)');
       await _peerConnection!.setLocalDescription(answer);
-      debugPrint('[WebRTC] Answer created');
+      debugPrint('[WebRTC] Local description set');
 
+      // Send answer to server
+      debugPrint('[WebRTC] Sending answer to broadcaster');
       _send({
         'type': 'answer',
         'to': _broadcasterId,
@@ -348,27 +373,32 @@ class WebRTCService extends ChangeNotifier {
       });
 
       _updateState(StreamState.connecting, 'Establishing connection...');
+      debugPrint('[WebRTC] Offer handling complete, waiting for ICE connection...');
 
-    } catch (e) {
+    } catch (e, stackTrace) {
       debugPrint('[WebRTC] Failed to handle offer: $e');
-      _updateState(StreamState.failed, 'Setup failed');
+      debugPrint('[WebRTC] Stack trace: $stackTrace');
+      _updateState(StreamState.failed, 'Setup failed: $e');
     }
   }
 
   void _setupPeerConnectionHandlers() {
     if (_peerConnection == null) return;
 
+    debugPrint('[WebRTC] Setting up peer connection handlers...');
+
+    // ICE Connection State - tracks actual ICE connectivity
     _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
+      debugPrint('[WebRTC] >>> ICE Connection State: $state');
       if (_isDisconnecting) return;
 
       final stateStr = state.toString().split('.').last;
       _updateIceState(stateStr);
-      debugPrint('[WebRTC] ICE: $stateStr');
 
       switch (state) {
         case RTCIceConnectionState.RTCIceConnectionStateConnected:
         case RTCIceConnectionState.RTCIceConnectionStateCompleted:
-          debugPrint('[WebRTC] *** CONNECTED ***');
+          debugPrint('[WebRTC] *** ICE CONNECTED ***');
           _updateState(StreamState.connected, 'Connected');
           break;
         case RTCIceConnectionState.RTCIceConnectionStateFailed:
@@ -376,22 +406,57 @@ class WebRTCService extends ChangeNotifier {
           _updateState(StreamState.failed, 'Connection failed');
           break;
         case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+          debugPrint('[WebRTC] *** ICE DISCONNECTED ***');
           if (_connectionState == StreamState.connected) {
             _updateState(StreamState.disconnected, 'Disconnected');
           }
           break;
         case RTCIceConnectionState.RTCIceConnectionStateChecking:
+          debugPrint('[WebRTC] *** ICE CHECKING ***');
           _updateState(StreamState.connecting, 'Connecting...');
           break;
+        case RTCIceConnectionState.RTCIceConnectionStateNew:
+          debugPrint('[WebRTC] *** ICE NEW ***');
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateClosed:
+          debugPrint('[WebRTC] *** ICE CLOSED ***');
+          break;
         default:
+          debugPrint('[WebRTC] ICE state: $stateStr');
           break;
       }
     };
 
-    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-      if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
-      if (_broadcasterId == null) return;
+    // Peer Connection State - overall connection health
+    _peerConnection!.onConnectionState = (RTCPeerConnectionState state) {
+      debugPrint('[WebRTC] >>> Peer Connection State: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _updateState(StreamState.failed, 'Peer connection failed');
+      }
+    };
 
+    // ICE Gathering State - local candidate gathering progress
+    _peerConnection!.onIceGatheringState = (RTCIceGatheringState state) {
+      debugPrint('[WebRTC] >>> ICE Gathering State: $state');
+    };
+
+    // Signaling State
+    _peerConnection!.onSignalingState = (RTCSignalingState state) {
+      debugPrint('[WebRTC] >>> Signaling State: $state');
+    };
+
+    // ICE Candidate - our local candidates to send to remote
+    _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
+      if (candidate.candidate == null || candidate.candidate!.isEmpty) {
+        debugPrint('[WebRTC] ICE gathering complete (null candidate)');
+        return;
+      }
+      if (_broadcasterId == null) {
+        debugPrint('[WebRTC] No broadcaster ID, cannot send ICE candidate');
+        return;
+      }
+
+      debugPrint('[WebRTC] Sending local ICE: ${candidate.candidate!.substring(0, 50.clamp(0, candidate.candidate!.length))}...');
       _send({
         'type': 'ice-candidate',
         'to': _broadcasterId,
@@ -401,60 +466,79 @@ class WebRTCService extends ChangeNotifier {
       });
     };
 
+    // Track event - remote media tracks
     _peerConnection!.onTrack = (RTCTrackEvent event) {
-      debugPrint('[WebRTC] Track: ${event.track.kind}');
+      debugPrint('[WebRTC] >>> onTrack: ${event.track.kind}, streams: ${event.streams.length}');
 
-      if (event.streams.isEmpty) return;
+      if (event.streams.isEmpty) {
+        debugPrint('[WebRTC] Warning: Track has no streams');
+        return;
+      }
 
       final stream = event.streams[0];
+      debugPrint('[WebRTC] Stream ID: ${stream.id}, tracks: ${stream.getTracks().length}');
 
       if (event.track.kind == 'video') {
-        debugPrint('[WebRTC] Setting video stream');
+        debugPrint('[WebRTC] Setting video stream to renderer');
         _remoteStream = stream;
         if (_remoteRenderer != null) {
           _remoteRenderer!.srcObject = stream;
         }
         notifyListeners();
-      } else if (event.track.kind == 'audio' && _remoteStream == null) {
-        _remoteStream = stream;
-        if (_remoteRenderer != null) {
+      } else if (event.track.kind == 'audio') {
+        debugPrint('[WebRTC] Audio track received');
+        if (_remoteStream == null && _remoteRenderer != null) {
+          _remoteStream = stream;
           _remoteRenderer!.srcObject = stream;
+          notifyListeners();
         }
-        notifyListeners();
       }
     };
 
+    // Legacy addStream event
     _peerConnection!.onAddStream = (MediaStream stream) {
-      debugPrint('[WebRTC] onAddStream: ${stream.getTracks().length} tracks');
+      debugPrint('[WebRTC] >>> onAddStream: ${stream.getTracks().length} tracks');
       if (_remoteStream == null && _remoteRenderer != null) {
         _remoteStream = stream;
         _remoteRenderer!.srcObject = stream;
         notifyListeners();
       }
     };
+
+    debugPrint('[WebRTC] Peer connection handlers set up');
   }
 
   Future<void> _processQueuedIceCandidates() async {
-    if (_pendingIceCandidates.isEmpty) return;
+    if (_pendingIceCandidates.isEmpty) {
+      debugPrint('[WebRTC] No queued ICE candidates to process');
+      return;
+    }
 
-    debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} queued candidates');
+    debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} queued remote ICE candidates');
 
+    int added = 0;
     for (final data in List.from(_pendingIceCandidates)) {
-      await _addIceCandidate(data);
+      final success = await _addIceCandidate(data);
+      if (success) added++;
     }
     _pendingIceCandidates.clear();
+    debugPrint('[WebRTC] Processed queued candidates, $added added successfully');
   }
 
   Future<void> _handleIceCandidate(Map<String, dynamic> data) async {
     if (!_remoteDescriptionSet || _peerConnection == null) {
+      debugPrint('[WebRTC] Queueing ICE candidate (remote desc set: $_remoteDescriptionSet, pc: ${_peerConnection != null})');
       _pendingIceCandidates.add(data);
       return;
     }
     await _addIceCandidate(data);
   }
 
-  Future<void> _addIceCandidate(Map<String, dynamic> data) async {
-    if (_peerConnection == null || _isDisconnecting) return;
+  Future<bool> _addIceCandidate(Map<String, dynamic> data) async {
+    if (_peerConnection == null || _isDisconnecting) {
+      debugPrint('[WebRTC] Cannot add ICE: pc=${_peerConnection != null}, disconnecting=$_isDisconnecting');
+      return false;
+    }
 
     try {
       String? candidateStr;
@@ -473,15 +557,24 @@ class WebRTCService extends ChangeNotifier {
         sdpMLineIndex = candidateData['sdpMLineIndex'] as int?;
       }
 
-      if (candidateStr == null || candidateStr.isEmpty) return;
+      if (candidateStr == null || candidateStr.isEmpty) {
+        debugPrint('[WebRTC] Empty ICE candidate string');
+        return false;
+      }
 
+      // Provide defaults if missing
       sdpMid ??= sdpMLineIndex?.toString() ?? '0';
       sdpMLineIndex ??= 0;
 
+      debugPrint('[WebRTC] Adding remote ICE candidate: ${candidateStr.substring(0, 50.clamp(0, candidateStr.length))}...');
+
       final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
       await _peerConnection!.addCandidate(candidate);
+      debugPrint('[WebRTC] Remote ICE candidate added successfully');
+      return true;
     } catch (e) {
       debugPrint('[WebRTC] Error adding ICE candidate: $e');
+      return false;
     }
   }
 
