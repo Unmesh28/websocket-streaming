@@ -5,7 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:http/http.dart' as http;
 
-enum ConnectionState {
+enum StreamStreamConnectionState {
   disconnected,
   connecting,
   connected,
@@ -17,7 +17,7 @@ class WebRTCService extends ChangeNotifier {
   RTCPeerConnection? _peerConnection;
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
-  ConnectionState _connectionState = ConnectionState.disconnected;
+  StreamConnectionState _connectionState = StreamConnectionState.disconnected;
   String _statusMessage = 'Disconnected';
   String _iceState = '';
 
@@ -28,13 +28,13 @@ class WebRTCService extends ChangeNotifier {
   List<Map<String, dynamic>>? _iceServers;
 
   // Getters
-  ConnectionState get connectionState => _connectionState;
+  StreamConnectionState get connectionState => _connectionState;
   String get statusMessage => _statusMessage;
   String get iceState => _iceState;
   bool get audioEnabled => _audioEnabled;
   bool get videoEnabled => _videoEnabled;
   RTCVideoRenderer get remoteRenderer => _remoteRenderer;
-  bool get isConnected => _connectionState == ConnectionState.connected;
+  bool get isConnected => _connectionState == StreamConnectionState.connected;
 
   WebRTCService() {
     _initRenderer();
@@ -44,7 +44,7 @@ class WebRTCService extends ChangeNotifier {
     await _remoteRenderer.initialize();
   }
 
-  void _updateState(ConnectionState state, String message) {
+  void _updateState(StreamConnectionState state, String message) {
     _connectionState = state;
     _statusMessage = message;
     notifyListeners();
@@ -56,10 +56,10 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> connect(String serverUrl) async {
-    if (_connectionState == ConnectionState.connecting) return;
+    if (_connectionState == StreamConnectionState.connecting) return;
 
     _currentUrl = serverUrl;
-    _updateState(ConnectionState.connecting, 'Connecting...');
+    _updateState(StreamConnectionState.connecting, 'Connecting...');
 
     try {
       // Fetch TURN credentials first
@@ -67,28 +67,28 @@ class WebRTCService extends ChangeNotifier {
 
       // Connect WebSocket
       final wsUrl = _getWebSocketUrl(serverUrl);
-      _updateState(ConnectionState.connecting, 'Connecting to $wsUrl...');
+      _updateState(StreamConnectionState.connecting, 'Connecting to $wsUrl...');
 
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
       _channel!.stream.listen(
         _onMessage,
         onError: (error) {
-          _updateState(ConnectionState.failed, 'WebSocket error: $error');
+          _updateState(StreamConnectionState.failed, 'WebSocket error: $error');
         },
         onDone: () {
-          if (_connectionState != ConnectionState.disconnected) {
-            _updateState(ConnectionState.disconnected, 'Connection closed');
+          if (_connectionState != StreamConnectionState.disconnected) {
+            _updateState(StreamConnectionState.disconnected, 'Connection closed');
           }
         },
       );
 
       // Register as viewer
       _send({'type': 'register', 'role': 'viewer'});
-      _updateState(ConnectionState.connecting, 'Registered, waiting for stream...');
+      _updateState(StreamConnectionState.connecting, 'Registered, waiting for stream...');
 
     } catch (e) {
-      _updateState(ConnectionState.failed, 'Connection failed: $e');
+      _updateState(StreamConnectionState.failed, 'Connection failed: $e');
     }
   }
 
@@ -150,7 +150,7 @@ class WebRTCService extends ChangeNotifier {
           _handleIceCandidate(data);
           break;
         case 'streamer-disconnected':
-          _updateState(ConnectionState.disconnected, 'Streamer disconnected');
+          _updateState(StreamConnectionState.disconnected, 'Streamer disconnected');
           break;
         default:
           debugPrint('Unknown message type: $type');
@@ -161,7 +161,7 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> _handleOffer(Map<String, dynamic> data) async {
-    _updateState(ConnectionState.connecting, 'Received offer, creating answer...');
+    _updateState(StreamConnectionState.connecting, 'Received offer, creating answer...');
 
     try {
       // Create peer connection
@@ -173,18 +173,18 @@ class WebRTCService extends ChangeNotifier {
       _peerConnection = await createPeerConnection(config);
 
       // Set up event handlers
-      _peerConnection!.onIceConnectionState = (state) {
+      _peerConnection!.onIceStreamConnectionState = (state) {
         final stateStr = state.toString().split('.').last;
         _updateIceState(stateStr);
         debugPrint('ICE state: $stateStr');
 
-        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-          _updateState(ConnectionState.connected, 'Connected');
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-          _updateState(ConnectionState.failed, 'ICE connection failed');
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-          _updateState(ConnectionState.disconnected, 'Disconnected');
+        if (state == RTCIceStreamConnectionState.RTCIceStreamConnectionStateConnected ||
+            state == RTCIceStreamConnectionState.RTCIceStreamConnectionStateCompleted) {
+          _updateState(StreamConnectionState.connected, 'Connected');
+        } else if (state == RTCIceStreamConnectionState.RTCIceStreamConnectionStateFailed) {
+          _updateState(StreamConnectionState.failed, 'ICE connection failed');
+        } else if (state == RTCIceStreamConnectionState.RTCIceStreamConnectionStateDisconnected) {
+          _updateState(StreamConnectionState.disconnected, 'Disconnected');
         }
       };
 
@@ -225,10 +225,10 @@ class WebRTCService extends ChangeNotifier {
         'sdp': answer.sdp,
       });
 
-      _updateState(ConnectionState.connecting, 'Answer sent, establishing connection...');
+      _updateState(StreamConnectionState.connecting, 'Answer sent, establishing connection...');
 
     } catch (e) {
-      _updateState(ConnectionState.failed, 'Failed to handle offer: $e');
+      _updateState(StreamConnectionState.failed, 'Failed to handle offer: $e');
     }
   }
 
@@ -276,7 +276,7 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
-    _updateState(ConnectionState.disconnected, 'Disconnected');
+    _updateState(StreamConnectionState.disconnected, 'Disconnected');
 
     await _cleanup();
   }
