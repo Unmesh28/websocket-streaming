@@ -99,6 +99,10 @@
             background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
         }
 
+        .btn-refresh {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }
+
         button:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(0,0,0,0.3);
@@ -200,6 +204,7 @@
                 <input type="text" id="serverUrl" placeholder="Signaling Server URL" value="ws://localhost:8080">
                 <button class="btn-connect" id="connectBtn" onclick="connectToStream()">▶️ Connect</button>
                 <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>⏹️ Disconnect</button>
+                <button class="btn-refresh" id="refreshBtn" onclick="refresh()" disabled>🔄 Refresh</button>
             </div>
         </div>
 
@@ -295,6 +300,9 @@
         let pc = null;
         let viewerId = null;
         let iceServers = null; // Will be fetched from server
+        let isConnecting = false; // Connection guard
+        let isDisconnecting = false; // Disconnect guard
+        let connectionTimeout = null; // Connection timeout timer
 
         const video = document.getElementById('video');
         const statusEl = document.getElementById('status');
@@ -304,6 +312,7 @@
         const errorBox = document.getElementById('errorBox');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
 
         // Add video element event listeners for debugging
         video.addEventListener('loadstart', () => log('VIDEO-EVENT', 'loadstart'));
@@ -350,7 +359,18 @@
         }
 
         async function connectToStream() {
+            // Connection guard - prevent multiple simultaneous connection attempts
+            if (isConnecting) {
+                log('CONNECT', 'Already connecting, ignoring request');
+                return;
+            }
+            if (isDisconnecting) {
+                log('CONNECT', 'Currently disconnecting, please wait');
+                return;
+            }
+
             try {
+                isConnecting = true;
                 const streamId = document.getElementById('streamId').value.trim();
                 const serverUrl = document.getElementById('serverUrl').value.trim();
 
@@ -358,12 +378,18 @@
 
                 if (!streamId || !serverUrl) {
                     showError('Please enter stream ID and server URL');
+                    isConnecting = false;
                     return;
                 }
+
+                // Clean up any existing connection first
+                await cleanupConnection();
 
                 updateStatus('Connecting...');
                 errorBox.style.display = 'none';
                 connectBtn.disabled = true;
+                disconnectBtn.disabled = true;
+                refreshBtn.disabled = true;
 
                 // Fetch TURN credentials from server first
                 log('TURN', 'Fetching TURN credentials...');
@@ -385,6 +411,16 @@
 
                 // Connect to signaling server
                 ws = new WebSocket(serverUrl);
+
+                // Set connection timeout (15 seconds)
+                connectionTimeout = setTimeout(() => {
+                    if (isConnecting) {
+                        log('TIMEOUT', 'Connection timeout - no video after 15 seconds');
+                        showError('Connection timeout - please try again');
+                        isConnecting = false;
+                        disconnect();
+                    }
+                }, 15000);
 
                 ws.onopen = () => {
                     log('WEBSOCKET', 'Connected to signaling server');
@@ -433,19 +469,25 @@
                 ws.onerror = (error) => {
                     log('WEBSOCKET', 'Error', error);
                     showError('WebSocket connection failed');
+                    isConnecting = false;
                     disconnect();
                 };
 
                 ws.onclose = (event) => {
                     log('WEBSOCKET', `Closed - code: ${event.code}, reason: ${event.reason}`);
+                    isConnecting = false;
                     if (statusEl.textContent !== 'Disconnected') {
                         updateStatus('Disconnected');
+                        connectBtn.disabled = false;
+                        disconnectBtn.disabled = true;
+                        refreshBtn.disabled = true;
                     }
                 };
 
             } catch (error) {
                 log('ERROR', 'Connection error', error);
                 showError(error.message);
+                isConnecting = false;
                 disconnect();
             }
         }
@@ -496,7 +538,13 @@
                     });
 
                     updateStatus('Connected');
+                    isConnecting = false;
+                    if (connectionTimeout) {
+                        clearTimeout(connectionTimeout);
+                        connectionTimeout = null;
+                    }
                     disconnectBtn.disabled = false;
+                    refreshBtn.disabled = false;
                 } else if (event.track.kind === 'audio') {
                     log('WEBRTC', 'Audio track received');
                     // If video already has srcObject, add audio track to it
@@ -596,20 +644,67 @@
             }
         }
 
-        function disconnect() {
-            log('DISCONNECT', 'Disconnecting...');
+        // Internal cleanup function - doesn't update UI state
+        async function cleanupConnection() {
+            log('CLEANUP', 'Cleaning up existing connection...');
+
+            // Clear connection timeout
+            if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+                connectionTimeout = null;
+            }
+
             if (pc) {
+                log('CLEANUP', 'Closing peer connection');
+                pc.ontrack = null;
+                pc.onicecandidate = null;
+                pc.onconnectionstatechange = null;
+                pc.oniceconnectionstatechange = null;
+                pc.onicegatheringstatechange = null;
+                pc.onsignalingstatechange = null;
                 pc.close();
                 pc = null;
             }
 
             if (ws) {
-                ws.close();
+                log('CLEANUP', 'Closing WebSocket');
+                ws.onopen = null;
+                ws.onmessage = null;
+                ws.onerror = null;
+                ws.onclose = null;
+                if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                    ws.close();
+                }
                 ws = null;
             }
 
-            video.srcObject = null;
+            if (video.srcObject) {
+                log('CLEANUP', 'Stopping video tracks');
+                const tracks = video.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                video.srcObject = null;
+            }
+
             viewerId = null;
+            log('CLEANUP', 'Cleanup complete');
+
+            // Small delay to ensure resources are released
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        async function disconnect() {
+            if (isDisconnecting) {
+                log('DISCONNECT', 'Already disconnecting, ignoring');
+                return;
+            }
+
+            isDisconnecting = true;
+            log('DISCONNECT', 'Disconnecting...');
+
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = true;
+
+            await cleanupConnection();
 
             updateStatus('Disconnected');
             currentStreamEl.textContent = '-';
@@ -618,7 +713,35 @@
 
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
+            refreshBtn.disabled = true;
+            isDisconnecting = false;
+            isConnecting = false; // Reset in case it was stuck
             log('DISCONNECT', 'Disconnected');
+        }
+
+        // Refresh function - disconnect and reconnect smoothly
+        async function refresh() {
+            if (isConnecting || isDisconnecting) {
+                log('REFRESH', 'Operation in progress, ignoring refresh');
+                return;
+            }
+
+            log('REFRESH', 'Refreshing connection...');
+            refreshBtn.disabled = true;
+
+            // Save current settings
+            const streamId = document.getElementById('streamId').value.trim();
+            const serverUrl = document.getElementById('serverUrl').value.trim();
+
+            // Disconnect first
+            await disconnect();
+
+            // Small delay to ensure cleanup
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            // Reconnect
+            await connectToStream();
+            log('REFRESH', 'Refresh complete');
         }
 
         // Auto-cleanup on page unload
