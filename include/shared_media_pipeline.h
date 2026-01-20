@@ -164,6 +164,11 @@ private:
     static bool turn_configured_;
     static bool use_cloudflare_turn_;
 
+    // Global mutex for ICE operations to prevent libnice race conditions
+    // libnice has internal state that can crash when multiple peers
+    // process ICE candidates simultaneously
+    static std::mutex global_ice_mutex_;
+
     // GStreamer callbacks
     static void onNegotiationNeeded(GstElement* webrtc, gpointer user_data);
     static void onIceCandidate(GstElement* webrtc, guint mlineindex,

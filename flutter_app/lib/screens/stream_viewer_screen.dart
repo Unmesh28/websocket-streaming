@@ -157,6 +157,8 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
   Widget _buildConnectionPanel() {
     return Consumer<WebRTCService>(
       builder: (context, service, _) {
+        // Use the operation flag to properly disable buttons during connect/disconnect
+        final isOperationInProgress = service.isOperationInProgress;
         final isConnecting = service.connectionState == StreamState.connecting;
 
         return Container(
@@ -165,7 +167,7 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // URL input
+              // URL input - disabled during any operation
               TextField(
                 controller: _urlController,
                 decoration: InputDecoration(
@@ -180,7 +182,7 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
                 ),
                 style: const TextStyle(color: Colors.white),
                 keyboardType: TextInputType.url,
-                enabled: !isConnecting,
+                enabled: !isOperationInProgress,
               ),
 
               const SizedBox(height: 12),
@@ -190,7 +192,8 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
                 children: [
                   Expanded(
                     child: ElevatedButton.icon(
-                      onPressed: isConnecting
+                      // Disable during any operation
+                      onPressed: isOperationInProgress
                           ? null
                           : () {
                               if (service.isConnected) {
@@ -202,13 +205,26 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
                                 }
                               }
                             },
-                      icon: Icon(
-                        service.isConnected
-                            ? Icons.stop
-                            : Icons.play_arrow,
-                      ),
+                      icon: isConnecting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : Icon(
+                              service.isConnected
+                                  ? Icons.stop
+                                  : Icons.play_arrow,
+                            ),
                       label: Text(
-                        service.isConnected ? 'Disconnect' : 'Connect',
+                        isConnecting
+                            ? 'Connecting...'
+                            : service.isConnected
+                                ? 'Disconnect'
+                                : 'Connect',
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: service.isConnected
@@ -222,10 +238,11 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
 
                   const SizedBox(width: 12),
 
-                  // Refresh button
+                  // Refresh button - disabled during operations
                   ElevatedButton.icon(
-                    onPressed: service.isConnected ||
-                              service.connectionState == StreamState.failed
+                    onPressed: !isOperationInProgress &&
+                              (service.isConnected ||
+                               service.connectionState == StreamState.failed)
                         ? () => service.refresh()
                         : null,
                     icon: const Icon(Icons.refresh),
