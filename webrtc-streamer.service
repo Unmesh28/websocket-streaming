@@ -1,0 +1,39 @@
+# Systemd service file for WebRTC Streamer
+# Install: sudo cp webrtc-streamer.service /etc/systemd/system/
+# Enable:  sudo systemctl enable webrtc-streamer
+# Start:   sudo systemctl start webrtc-streamer
+# Logs:    journalctl -u webrtc-streamer -f
+
+[Unit]
+Description=WebRTC Streamer for Raspberry Pi Camera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/websocket-streaming
+
+# Set the signaling server URL here
+Environment="SIGNALING_URL=wss://your-server.ngrok-free.app"
+
+ExecStart=/home/pi/websocket-streaming/build/webrtc_streamer ${SIGNALING_URL}
+
+# Automatic restart on failure
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=80%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=webrtc-streamer
+
+[Install]
+WantedBy=multi-user.target
