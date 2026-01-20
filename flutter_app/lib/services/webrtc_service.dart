@@ -40,6 +40,7 @@ class WebRTCService extends ChangeNotifier {
   bool _isConnecting = false;
   bool _isDisconnecting = false;
   Completer<void>? _cleanupCompleter;
+  Timer? _diagnosticsTimer;
 
   // Getters
   StreamState get connectionState => _connectionState;
@@ -321,16 +322,21 @@ class WebRTCService extends ChangeNotifier {
       final iceServers = _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}];
       debugPrint('[WebRTC] Using ${iceServers.length} ICE servers:');
       for (var server in iceServers) {
-        debugPrint('[WebRTC]   - ${server['urls']}');
+        final urls = server['urls'];
+        final hasCredentials = server.containsKey('username');
+        debugPrint('[WebRTC]   - $urls ${hasCredentials ? "(with credentials)" : "(no credentials)"}');
       }
 
+      // Note: 'all' allows both STUN and TURN, 'relay' forces TURN only
+      // If ICE fails on emulator, try 'relay' to force TURN
       final config = <String, dynamic>{
         'iceServers': iceServers,
         'sdpSemantics': 'unified-plan',
-        'iceTransportPolicy': 'all',
+        'iceTransportPolicy': 'all',  // Change to 'relay' if STUN doesn't work
         'bundlePolicy': 'max-bundle',
         'rtcpMuxPolicy': 'require',
       };
+      debugPrint('[WebRTC] RTCPeerConnection config: iceTransportPolicy=${config['iceTransportPolicy']}');
 
       debugPrint('[WebRTC] Creating peer connection...');
       _peerConnection = await createPeerConnection(config);
@@ -342,7 +348,9 @@ class WebRTCService extends ChangeNotifier {
       // Set remote description (offer) FIRST
       // This triggers track events and ICE gathering
       debugPrint('[WebRTC] Setting remote description (offer)');
-      final offer = RTCSessionDescription(data['sdp'] as String, 'offer');
+      final sdpStr = data['sdp'] as String;
+      _logSdpInfo('OFFER', sdpStr);
+      final offer = RTCSessionDescription(sdpStr, 'offer');
       await _peerConnection!.setRemoteDescription(offer);
       _remoteDescriptionSet = true;
       debugPrint('[WebRTC] Remote description set successfully');
@@ -355,6 +363,9 @@ class WebRTCService extends ChangeNotifier {
       debugPrint('[WebRTC] Creating answer...');
       final answer = await _peerConnection!.createAnswer();
       debugPrint('[WebRTC] Answer created, SDP length: ${answer.sdp?.length}');
+      if (answer.sdp != null) {
+        _logSdpInfo('ANSWER', answer.sdp!);
+      }
 
       debugPrint('[WebRTC] Setting local description (answer)...');
       await _peerConnection!.setLocalDescription(answer);
@@ -375,6 +386,9 @@ class WebRTCService extends ChangeNotifier {
       final iceState = await _peerConnection?.getIceConnectionState();
       final gatherState = await _peerConnection?.getIceGatheringState();
       debugPrint('[WebRTC] Current ICE state: $iceState, Gathering: $gatherState');
+
+      // Start diagnostics timer to track connection progress
+      _startDiagnosticsTimer();
 
     } catch (e, stackTrace) {
       debugPrint('[WebRTC] Failed to handle offer: $e');
@@ -603,6 +617,109 @@ class WebRTCService extends ChangeNotifier {
     }
   }
 
+  /// Log key SDP information for diagnostics
+  void _logSdpInfo(String label, String sdp) {
+    debugPrint('[WebRTC] ===== SDP $label =====');
+
+    // Count media sections
+    final videoCount = RegExp(r'm=video').allMatches(sdp).length;
+    final audioCount = RegExp(r'm=audio').allMatches(sdp).length;
+    debugPrint('[WebRTC] Media sections: video=$videoCount, audio=$audioCount');
+
+    // Check for ICE credentials
+    final hasIceUfrag = sdp.contains('a=ice-ufrag:');
+    final hasIcePwd = sdp.contains('a=ice-pwd:');
+    debugPrint('[WebRTC] ICE credentials: ufrag=$hasIceUfrag, pwd=$hasIcePwd');
+
+    // Check for ICE candidates already in SDP (trickle ICE vs full)
+    final candidateCount = RegExp(r'a=candidate:').allMatches(sdp).length;
+    debugPrint('[WebRTC] Inline ICE candidates: $candidateCount');
+
+    // Check for fingerprint (DTLS)
+    final hasFingerprint = sdp.contains('a=fingerprint:');
+    debugPrint('[WebRTC] DTLS fingerprint present: $hasFingerprint');
+
+    // Check direction
+    final hasRecvonly = sdp.contains('a=recvonly');
+    final hasSendrecv = sdp.contains('a=sendrecv');
+    final hasSendonly = sdp.contains('a=sendonly');
+    debugPrint('[WebRTC] Direction: recvonly=$hasRecvonly, sendrecv=$hasSendrecv, sendonly=$hasSendonly');
+
+    // Log first 500 chars for context
+    debugPrint('[WebRTC] SDP preview: ${sdp.substring(0, sdp.length.clamp(0, 500))}...');
+    debugPrint('[WebRTC] ===== END SDP $label =====');
+  }
+
+  /// Start periodic diagnostics during connection
+  void _startDiagnosticsTimer() {
+    _stopDiagnosticsTimer();
+    int count = 0;
+    _diagnosticsTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      count++;
+      debugPrint('[WebRTC] === Periodic check #$count ===');
+
+      // Stop after 5 checks (15 seconds) or if connected
+      if (count >= 5 || _connectionState == StreamState.connected ||
+          _connectionState == StreamState.failed ||
+          _connectionState == StreamState.disconnected) {
+        debugPrint('[WebRTC] Stopping periodic diagnostics');
+        timer.cancel();
+        _diagnosticsTimer = null;
+        return;
+      }
+
+      await dumpDiagnostics();
+    });
+  }
+
+  /// Stop the diagnostics timer
+  void _stopDiagnosticsTimer() {
+    _diagnosticsTimer?.cancel();
+    _diagnosticsTimer = null;
+  }
+
+  /// Diagnostic method to dump current state
+  Future<void> dumpDiagnostics() async {
+    debugPrint('[WebRTC] ===== DIAGNOSTICS =====');
+    debugPrint('[WebRTC] connectionState: $_connectionState');
+    debugPrint('[WebRTC] isConnecting: $_isConnecting');
+    debugPrint('[WebRTC] isDisconnecting: $_isDisconnecting');
+    debugPrint('[WebRTC] remoteDescriptionSet: $_remoteDescriptionSet');
+    debugPrint('[WebRTC] pendingIceCandidates: ${_pendingIceCandidates.length}');
+    debugPrint('[WebRTC] viewerId: $_viewerId');
+    debugPrint('[WebRTC] broadcasterId: $_broadcasterId');
+
+    if (_peerConnection != null) {
+      try {
+        final iceState = await _peerConnection!.getIceConnectionState();
+        final gatherState = await _peerConnection!.getIceGatheringState();
+        final sigState = await _peerConnection!.getSignalingState();
+        final connState = await _peerConnection!.getConnectionState();
+        debugPrint('[WebRTC] PC iceConnectionState: $iceState');
+        debugPrint('[WebRTC] PC iceGatheringState: $gatherState');
+        debugPrint('[WebRTC] PC signalingState: $sigState');
+        debugPrint('[WebRTC] PC connectionState: $connState');
+
+        // Get stats for more info
+        final stats = await _peerConnection!.getStats();
+        int candidatePairs = 0;
+        int localCandidates = 0;
+        int remoteCandidates = 0;
+        for (final report in stats) {
+          if (report.type == 'candidate-pair') candidatePairs++;
+          if (report.type == 'local-candidate') localCandidates++;
+          if (report.type == 'remote-candidate') remoteCandidates++;
+        }
+        debugPrint('[WebRTC] Stats: candidatePairs=$candidatePairs, localCandidates=$localCandidates, remoteCandidates=$remoteCandidates');
+      } catch (e) {
+        debugPrint('[WebRTC] Error getting PC state: $e');
+      }
+    } else {
+      debugPrint('[WebRTC] No peer connection');
+    }
+    debugPrint('[WebRTC] ===== END DIAGNOSTICS =====');
+  }
+
   /// Disconnect from stream
   Future<void> disconnect() async {
     if (_isDisconnecting) {
@@ -660,6 +777,9 @@ class WebRTCService extends ChangeNotifier {
   /// Internal cleanup - closes all resources thoroughly
   Future<void> _cleanupInternal() async {
     debugPrint('[WebRTC] Cleaning up...');
+
+    // Stop diagnostics timer
+    _stopDiagnosticsTimer();
 
     // Cancel WebSocket subscription first
     await _channelSubscription?.cancel();
