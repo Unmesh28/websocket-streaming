@@ -273,12 +273,17 @@ class WebRTCService extends ChangeNotifier {
     if (_peerConnection == null) return;
 
     try {
+      // Debug: print full ICE candidate data received
+      debugPrint('[WebRTC] ICE candidate data: $data');
+
       // Handle different ICE candidate formats from server
       String? candidateStr;
       String? sdpMid;
       int? sdpMLineIndex;
 
       final candidateData = data['candidate'];
+      debugPrint('[WebRTC] candidateData type: ${candidateData.runtimeType}, value: $candidateData');
+
       if (candidateData is String) {
         // Direct string format
         candidateStr = candidateData;
@@ -291,15 +296,24 @@ class WebRTCService extends ChangeNotifier {
         sdpMLineIndex = candidateData['sdpMLineIndex'] as int?;
       }
 
+      debugPrint('[WebRTC] Parsed: candidateStr=$candidateStr, sdpMid=$sdpMid, sdpMLineIndex=$sdpMLineIndex');
+
       // Skip if no valid candidate string
       if (candidateStr == null || candidateStr.isEmpty) {
         debugPrint('[WebRTC] Skipping empty ICE candidate');
         return;
       }
 
-      final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
+      // Ensure sdpMid has a value - native layer may crash if null
+      // Default to "0" or "audio"/"video" based on sdpMLineIndex
+      if (sdpMid == null || sdpMid.isEmpty) {
+        sdpMid = sdpMLineIndex?.toString() ?? '0';
+        debugPrint('[WebRTC] Using default sdpMid: $sdpMid');
+      }
+
+      final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex ?? 0);
       await _peerConnection!.addCandidate(candidate);
-      debugPrint('[WebRTC] Added ICE candidate');
+      debugPrint('[WebRTC] Added ICE candidate successfully');
     } catch (e) {
       debugPrint('[WebRTC] Error adding ICE candidate: $e');
     }
