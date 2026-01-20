@@ -896,62 +896,65 @@ void WebRTCPeer::cleanup() {
         webrtc_audio_sink_ = nullptr;
     }
 
-    // NOW set elements to NULL state (after unlinking)
-    // Use locked state and non-blocking approach to prevent cleanup from hanging
+    // CRITICAL: Remove elements from pipeline FIRST to disconnect from pipeline state management
+    // This prevents blocking when setting state to NULL
+    LOG("PEER", "Removing elements from pipeline (before state change)...");
+
+    // Lock states first to prevent pipeline from trying to manage them
+    if (video_queue_) gst_element_set_locked_state(video_queue_, TRUE);
+    if (audio_queue_) gst_element_set_locked_state(audio_queue_, TRUE);
+    if (webrtcbin_) gst_element_set_locked_state(webrtcbin_, TRUE);
+    LOG("PEER", "Locked element states");
+
+    // Remove from pipeline - this disconnects them completely
+    GstElement* vq = video_queue_;
+    GstElement* aq = audio_queue_;
+    GstElement* wb = webrtcbin_;
+
+    if (vq) {
+        gst_bin_remove(GST_BIN(pipeline_), vq);
+        video_queue_ = nullptr;
+        LOG("PEER", "Removed video_queue from pipeline");
+    }
+    if (aq) {
+        gst_bin_remove(GST_BIN(pipeline_), aq);
+        audio_queue_ = nullptr;
+        LOG("PEER", "Removed audio_queue from pipeline");
+    }
+    if (wb) {
+        gst_bin_remove(GST_BIN(pipeline_), wb);
+        webrtcbin_ = nullptr;
+        LOG("PEER", "Removed webrtcbin from pipeline");
+    }
+
+    // Now set states to NULL (elements are no longer in pipeline, so this shouldn't block)
     LOG("PEER", "Setting elements to NULL state...");
-
-    // Lock states to prevent any blocking during cleanup
-    if (video_queue_) {
-        gst_element_set_locked_state(video_queue_, TRUE);
-        gst_element_set_state(video_queue_, GST_STATE_NULL);
-        LOG("PEER", "video_queue set to NULL (locked)");
+    if (vq) {
+        gst_element_set_state(vq, GST_STATE_NULL);
+        gst_object_unref(vq);
+        LOG("PEER", "video_queue set to NULL and unref'd");
     }
-    if (audio_queue_) {
-        gst_element_set_locked_state(audio_queue_, TRUE);
-        gst_element_set_state(audio_queue_, GST_STATE_NULL);
-        LOG("PEER", "audio_queue set to NULL (locked)");
+    if (aq) {
+        gst_element_set_state(aq, GST_STATE_NULL);
+        gst_object_unref(aq);
+        LOG("PEER", "audio_queue set to NULL and unref'd");
     }
-
-    // webrtcbin cleanup - this is the critical one with ICE agent
-    if (webrtcbin_) {
-        LOG("PEER", "Setting webrtcbin to NULL (this triggers ICE/TURN cleanup)...");
-        gst_element_set_locked_state(webrtcbin_, TRUE);
-        gst_element_set_state(webrtcbin_, GST_STATE_NULL);
-
-        // Wait briefly for webrtcbin, but don't block forever
-        GstStateChangeReturn ret = gst_element_get_state(webrtcbin_, nullptr, nullptr, 500 * GST_MSECOND);
-        if (ret == GST_STATE_CHANGE_SUCCESS) {
-            LOG("PEER", "webrtcbin state change to NULL completed");
-        } else {
-            LOG("PEER-WARN", "webrtcbin state change returned: " << ret << " (continuing anyway)");
-        }
+    if (wb) {
+        LOG("PEER", "Setting webrtcbin to NULL (triggers ICE cleanup)...");
+        gst_element_set_state(wb, GST_STATE_NULL);
+        gst_object_unref(wb);
+        LOG("PEER", "webrtcbin set to NULL and unref'd");
     }
 
-    // Run GLib main loop iterations to let libnice TURN refresh timers fire and cleanup
-    // This is critical - just sleeping doesn't help because libnice uses the main loop
-    LOG("PEER", "Running main loop for TURN cleanup (500ms)...");
+    // Run GLib main loop for longer to let libnice TURN refresh timers fire
+    LOG("PEER", "Running main loop for TURN cleanup (1000ms)...");
     GMainContext* context = g_main_context_default();
-    gint64 end_time = g_get_monotonic_time() + 500000;  // 500ms
+    gint64 end_time = g_get_monotonic_time() + 1000000;  // 1000ms (increased from 500ms)
     while (g_get_monotonic_time() < end_time) {
         g_main_context_iteration(context, FALSE);
         g_usleep(10000);  // 10ms between iterations
     }
     LOG("PEER", "Main loop cleanup complete");
-
-    // Remove elements from pipeline
-    LOG("PEER", "Removing elements from pipeline...");
-    if (video_queue_) {
-        gst_bin_remove(GST_BIN(pipeline_), video_queue_);
-        video_queue_ = nullptr;
-    }
-    if (audio_queue_) {
-        gst_bin_remove(GST_BIN(pipeline_), audio_queue_);
-        audio_queue_ = nullptr;
-    }
-    if (webrtcbin_) {
-        gst_bin_remove(GST_BIN(pipeline_), webrtcbin_);
-        webrtcbin_ = nullptr;
-    }
 
     LOG_VAR("PEER", "Peer cleanup complete: ", viewer_id_);
 }
