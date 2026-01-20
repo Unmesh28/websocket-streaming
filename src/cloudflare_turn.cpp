@@ -203,7 +203,8 @@ bool CloudflareTurn::fetchCredentials() {
         return false;
     }
 
-    if (http_code != 200) {
+    // Accept both 200 OK and 201 Created (Cloudflare returns 201)
+    if (http_code != 200 && http_code != 201) {
         std::cerr << "[CLOUDFLARE] API returned HTTP " << http_code << std::endl;
         std::cerr << "[CLOUDFLARE] Response: " << response << std::endl;
         return false;
