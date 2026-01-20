@@ -776,13 +776,23 @@ void WebRTCPeer::cleanup() {
     cleaned_up_ = true;
 
     // CRITICAL: For safe dynamic pipeline removal, we must:
-    // 0. Remove probes first (prevents callbacks during cleanup)
-    // 1. Unlink pads
-    // 2. Release request pads
-    // 3. Set elements to NULL
-    // 4. Remove from bin
+    // 0. Disconnect all signal handlers FIRST (prevents callbacks during cleanup)
+    // 1. Remove probes (prevents buffer callbacks during cleanup)
+    // 2. Unlink pads
+    // 3. Release request pads
+    // 4. Set elements to NULL
+    // 5. Remove from bin
 
-    // STEP 0: Remove all probes FIRST to prevent callbacks during cleanup
+    // STEP 0: Disconnect ALL signal handlers FIRST to prevent ICE/state callbacks on destroyed object
+    LOG("PEER", "Disconnecting signal handlers...");
+    if (webrtcbin_) {
+        // Disconnect all signals connected with 'this' as user_data
+        // This prevents ICE state change callbacks from firing after cleanup starts
+        g_signal_handlers_disconnect_by_data(webrtcbin_, this);
+        LOG("PEER", "Disconnected all signal handlers from webrtcbin");
+    }
+
+    // STEP 1: Remove all probes to prevent buffer callbacks during cleanup
     LOG("PEER", "Removing probes...");
     if (video_tee_pad_ && video_tee_probe_id_ != 0) {
         gst_pad_remove_probe(video_tee_pad_, video_tee_probe_id_);
