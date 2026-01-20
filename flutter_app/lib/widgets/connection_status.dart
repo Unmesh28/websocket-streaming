@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/webrtc_service.dart';
 
 class ConnectionStatus extends StatelessWidget {
-  final StreamConnectionState state;
+  final StreamState state;
   final String message;
   final String iceState;
 
@@ -58,25 +58,21 @@ class ConnectionStatus extends StatelessWidget {
     IconData icon;
 
     switch (state) {
-      case StreamConnectionState.connected:
+      case StreamState.connected:
         color = Colors.green;
         icon = Icons.check_circle;
-        break;
-      case StreamConnectionState.connecting:
+      case StreamState.connecting:
         color = Colors.orange;
         icon = Icons.sync;
-        break;
-      case StreamConnectionState.failed:
+      case StreamState.failed:
         color = Colors.red;
         icon = Icons.error;
-        break;
-      case StreamConnectionState.disconnected:
-      default:
+      case StreamState.disconnected:
         color = Colors.grey;
         icon = Icons.circle_outlined;
     }
 
-    if (state == StreamConnectionState.connecting) {
+    if (state == StreamState.connecting) {
       return SizedBox(
         width: 16,
         height: 16,

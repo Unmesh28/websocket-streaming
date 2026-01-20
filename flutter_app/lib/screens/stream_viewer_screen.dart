@@ -140,7 +140,7 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
   Widget _buildConnectionPanel() {
     return Consumer<WebRTCService>(
       builder: (context, service, _) {
-        final isConnecting = service.connectionState == StreamConnectionState.connecting;
+        final isConnecting = service.connectionState == StreamState.connecting;
 
         return Container(
           padding: const EdgeInsets.all(16),
@@ -208,7 +208,7 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
                   // Refresh button
                   ElevatedButton.icon(
                     onPressed: service.isConnected ||
-                              service.connectionState == StreamConnectionState.failed
+                              service.connectionState == StreamState.failed
                         ? () => service.refresh()
                         : null,
                     icon: const Icon(Icons.refresh),
