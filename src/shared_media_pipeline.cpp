@@ -883,12 +883,14 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
     }
 
     // STEP 3: Run GLib main loop for TURN cleanup
-    LOG("PEER", "Running main loop for TURN cleanup (500ms)...");
+    // Increased to 1500ms to give libnice more time to clean up TURN refreshes
+    // This helps prevent ICE connection failures after many connect/disconnect cycles
+    LOG("PEER", "Running main loop for TURN cleanup (1500ms)...");
     GMainContext* context = g_main_context_default();
-    gint64 turn_end_time = g_get_monotonic_time() + 500000;
+    gint64 turn_end_time = g_get_monotonic_time() + 1500000;  // 1.5 seconds
     while (g_get_monotonic_time() < turn_end_time) {
         g_main_context_iteration(context, FALSE);
-        g_usleep(5000);
+        g_usleep(10000);  // 10ms between iterations
     }
     LOG("PEER", "TURN cleanup main loop complete");
 
@@ -1007,31 +1009,37 @@ void WebRTCPeer::cleanup() {
             nullptr
         );
 
-        if (probe_id != 0) {
-            // Wait for the probe to complete with a timeout
-            g_mutex_lock(&ctx.mutex);
-            gint64 end_time = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;  // 3 second timeout
-            bool timed_out = false;
-            while (!ctx.done) {
-                if (!g_cond_wait_until(&ctx.cond, &ctx.mutex, end_time)) {
-                    LOG("PEER-WARN", "IDLE probe timed out for " << viewer_id_);
-                    timed_out = true;
-                    break;
+        // Check if callback already fired synchronously (common when pad is already idle)
+        // In that case, ctx.done will be true even if probe_id is 0
+        if (probe_id != 0 || ctx.done) {
+            if (!ctx.done) {
+                // Probe added but hasn't fired yet - wait for it
+                g_mutex_lock(&ctx.mutex);
+                gint64 end_time = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;  // 3 second timeout
+                bool timed_out = false;
+                while (!ctx.done) {
+                    if (!g_cond_wait_until(&ctx.cond, &ctx.mutex, end_time)) {
+                        LOG("PEER-WARN", "IDLE probe timed out for " << viewer_id_);
+                        timed_out = true;
+                        break;
+                    }
                 }
+                g_mutex_unlock(&ctx.mutex);
+
+                if (timed_out) {
+                    LOG("PEER", "IDLE probe timed out - doing full cleanup anyway");
+                }
+            } else {
+                // Callback already fired synchronously during gst_pad_add_probe
+                LOG("PEER", "IDLE probe fired synchronously - doing full cleanup");
             }
-            g_mutex_unlock(&ctx.mutex);
 
             // Now do the full cleanup AFTER the callback has returned
             // The callback only does unlinking, this does state changes, pad release, bin removal
-            if (ctx.done) {
-                LOG("PEER", "IDLE probe completed - now doing full cleanup");
-            } else if (timed_out) {
-                LOG("PEER", "IDLE probe timed out - doing full cleanup anyway");
-            }
             doCleanupInProbe(true);
         } else {
-            // Probe couldn't be added, do cleanup directly
-            LOG("PEER-WARN", "Could not add IDLE probe - doing direct cleanup");
+            // Probe couldn't be added AND callback didn't fire - this shouldn't happen normally
+            LOG("PEER-WARN", "Could not add IDLE probe and callback didn't fire - doing direct cleanup");
             doCleanupInProbe(true);
         }
 
