@@ -1,0 +1,39 @@
+name: pi_camera_viewer
+description: WebRTC viewer for Pi Camera stream
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # WebRTC support
+  flutter_webrtc: ^0.9.47
+
+  # WebSocket for signaling
+  web_socket_channel: ^2.4.0
+
+  # HTTP for TURN credentials
+  http: ^1.1.0
+
+  # State management
+  provider: ^6.1.1
+
+  # UI components
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/
