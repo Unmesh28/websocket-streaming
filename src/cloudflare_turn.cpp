@@ -5,6 +5,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <fstream>
+#include <vector>
 
 // Callback for libcurl to write response data
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* userp) {
@@ -31,33 +32,53 @@ void CloudflareTurn::setConfig(const Config& config) {
 bool CloudflareTurn::loadConfigFromEnv() {
     Config config;
 
-    // First try to load from .env file if it exists
-    std::ifstream env_file(".env");
-    if (env_file.is_open()) {
-        std::string line;
-        while (std::getline(env_file, line)) {
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#') continue;
+    // Try to load from .env file - check multiple locations
+    std::vector<std::string> env_paths = {
+        ".env",           // Current directory
+        "../.env",        // Parent directory (when running from build/)
+        "../../.env",     // Two levels up
+    };
 
-            size_t eq_pos = line.find('=');
-            if (eq_pos != std::string::npos) {
-                std::string key = line.substr(0, eq_pos);
-                std::string value = line.substr(eq_pos + 1);
+    bool found_env = false;
+    for (const auto& path : env_paths) {
+        std::ifstream env_file(path);
+        if (env_file.is_open()) {
+            std::cout << "[CLOUDFLARE] Loading config from: " << path << std::endl;
+            found_env = true;
+            std::string line;
+            while (std::getline(env_file, line)) {
+                // Skip comments and empty lines
+                if (line.empty() || line[0] == '#') continue;
 
-                // Remove quotes if present
-                if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                    value = value.substr(1, value.size() - 2);
-                }
+                size_t eq_pos = line.find('=');
+                if (eq_pos != std::string::npos) {
+                    std::string key = line.substr(0, eq_pos);
+                    std::string value = line.substr(eq_pos + 1);
 
-                if (key == "CLOUDFLARE_ACCOUNT_ID") config.account_id = value;
-                else if (key == "CLOUDFLARE_TURN_KEY_ID") config.turn_key_id = value;
-                else if (key == "CLOUDFLARE_API_TOKEN") config.api_token = value;
-                else if (key == "CLOUDFLARE_TURN_TTL") {
-                    try { config.ttl_seconds = std::stoi(value); } catch (...) {}
+                    // Remove quotes if present
+                    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+                        value = value.substr(1, value.size() - 2);
+                    }
+                    // Also handle single quotes
+                    if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
+                        value = value.substr(1, value.size() - 2);
+                    }
+
+                    if (key == "CLOUDFLARE_ACCOUNT_ID") config.account_id = value;
+                    else if (key == "CLOUDFLARE_TURN_KEY_ID") config.turn_key_id = value;
+                    else if (key == "CLOUDFLARE_API_TOKEN") config.api_token = value;
+                    else if (key == "CLOUDFLARE_TURN_TTL") {
+                        try { config.ttl_seconds = std::stoi(value); } catch (...) {}
+                    }
                 }
             }
+            env_file.close();
+            break;  // Stop after first found file
         }
-        env_file.close();
+    }
+
+    if (!found_env) {
+        std::cout << "[CLOUDFLARE] No .env file found in search paths" << std::endl;
     }
 
     // Override with environment variables if set
