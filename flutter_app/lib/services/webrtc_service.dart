@@ -15,8 +15,9 @@ enum StreamState {
 class WebRTCService extends ChangeNotifier {
   WebSocketChannel? _channel;
   RTCPeerConnection? _peerConnection;
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+  RTCVideoRenderer? _remoteRenderer;
   MediaStream? _remoteStream;
+  StreamSubscription? _channelSubscription;
 
   StreamState _connectionState = StreamState.disconnected;
   String _statusMessage = 'Disconnected';
@@ -31,9 +32,14 @@ class WebRTCService extends ChangeNotifier {
   String? _broadcasterId;
   List<Map<String, dynamic>>? _iceServers;
 
-  // Queue for ICE candidates that arrive before remote description is set
+  // Queue for ICE candidates
   final List<Map<String, dynamic>> _pendingIceCandidates = [];
   bool _remoteDescriptionSet = false;
+
+  // Connection management
+  bool _isConnecting = false;
+  bool _isDisconnecting = false;
+  Completer<void>? _cleanupCompleter;
 
   // Getters
   StreamState get connectionState => _connectionState;
@@ -41,7 +47,7 @@ class WebRTCService extends ChangeNotifier {
   String get iceState => _iceState;
   bool get audioEnabled => _audioEnabled;
   bool get videoEnabled => _videoEnabled;
-  RTCVideoRenderer get remoteRenderer => _remoteRenderer;
+  RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   bool get isConnected => _connectionState == StreamState.connected;
 
   WebRTCService() {
@@ -49,10 +55,12 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> _initRenderer() async {
-    await _remoteRenderer.initialize();
+    _remoteRenderer = RTCVideoRenderer();
+    await _remoteRenderer!.initialize();
   }
 
   void _updateState(StreamState state, String message) {
+    if (_connectionState == state && _statusMessage == message) return;
     _connectionState = state;
     _statusMessage = message;
     debugPrint('[WebRTC] State: $state - $message');
@@ -60,46 +68,76 @@ class WebRTCService extends ChangeNotifier {
   }
 
   void _updateIceState(String state) {
+    if (_iceState == state) return;
     _iceState = state;
     notifyListeners();
   }
 
-  Future<void> connect(String serverUrl, {String streamId = 'pi-camera-stream'}) async {
-    if (_connectionState == StreamState.connecting) return;
+  /// Main connect method - handles all connection logic
+  Future<bool> connect(String serverUrl, {String streamId = 'pi-camera-stream'}) async {
+    // Prevent multiple simultaneous connection attempts
+    if (_isConnecting) {
+      debugPrint('[WebRTC] Already connecting, ignoring...');
+      return false;
+    }
 
-    _currentUrl = serverUrl;
-    _currentStreamId = streamId;
-    _remoteDescriptionSet = false;
-    _pendingIceCandidates.clear();
-    _updateState(StreamState.connecting, 'Connecting...');
+    // If already connected to same URL, return success
+    if (_connectionState == StreamState.connected &&
+        _currentUrl == serverUrl &&
+        _currentStreamId == streamId) {
+      debugPrint('[WebRTC] Already connected to this stream');
+      return true;
+    }
+
+    _isConnecting = true;
 
     try {
-      // Fetch TURN credentials first
+      // Clean up any existing connection first
+      await _cleanupInternal();
+
+      _currentUrl = serverUrl;
+      _currentStreamId = streamId;
+      _remoteDescriptionSet = false;
+      _pendingIceCandidates.clear();
+
+      _updateState(StreamState.connecting, 'Connecting...');
+
+      // Fetch TURN credentials
       await _fetchTurnCredentials(serverUrl);
 
       // Connect WebSocket
       final wsUrl = _getWebSocketUrl(serverUrl);
-      _updateState(StreamState.connecting, 'Connecting to $wsUrl...');
+      _updateState(StreamState.connecting, 'Connecting to server...');
       debugPrint('[WebRTC] Connecting to WebSocket: $wsUrl');
 
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
-      _channel!.stream.listen(
+      // Set up WebSocket listener
+      _channelSubscription = _channel!.stream.listen(
         _onMessage,
         onError: (error) {
           debugPrint('[WebRTC] WebSocket error: $error');
-          _updateState(StreamState.failed, 'WebSocket error: $error');
+          if (_connectionState != StreamState.disconnected) {
+            _updateState(StreamState.failed, 'Connection error');
+          }
         },
         onDone: () {
           debugPrint('[WebRTC] WebSocket closed');
-          if (_connectionState != StreamState.disconnected) {
+          if (_connectionState != StreamState.disconnected && !_isDisconnecting) {
             _updateState(StreamState.disconnected, 'Connection closed');
           }
         },
+        cancelOnError: false,
       );
 
-      // Wait a moment for WebSocket to be ready, then join
-      await Future.delayed(const Duration(milliseconds: 100));
+      // Wait for WebSocket to be ready
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      // Check if we're still supposed to be connecting
+      if (_connectionState != StreamState.connecting) {
+        debugPrint('[WebRTC] Connection cancelled');
+        return false;
+      }
 
       // Join stream
       final joinMsg = {'type': 'join', 'stream_id': streamId};
@@ -107,10 +145,39 @@ class WebRTCService extends ChangeNotifier {
       _send(joinMsg);
       _updateState(StreamState.connecting, 'Joining stream...');
 
+      // Wait for connection with timeout
+      final connected = await _waitForConnection(timeout: const Duration(seconds: 15));
+      return connected;
+
     } catch (e) {
       debugPrint('[WebRTC] Connection failed: $e');
       _updateState(StreamState.failed, 'Connection failed: $e');
+      return false;
+    } finally {
+      _isConnecting = false;
     }
+  }
+
+  /// Wait for connection to be established
+  Future<bool> _waitForConnection({required Duration timeout}) async {
+    final startTime = DateTime.now();
+
+    while (DateTime.now().difference(startTime) < timeout) {
+      if (_connectionState == StreamState.connected) {
+        return true;
+      }
+      if (_connectionState == StreamState.failed ||
+          _connectionState == StreamState.disconnected) {
+        return false;
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+
+    // Timeout
+    if (_connectionState == StreamState.connecting) {
+      _updateState(StreamState.failed, 'Connection timeout');
+    }
+    return false;
   }
 
   Future<void> _fetchTurnCredentials(String serverUrl) async {
@@ -125,18 +192,15 @@ class WebRTCService extends ChangeNotifier {
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        debugPrint('[WebRTC] Raw TURN response: $data');
-
         final rawServers = List<Map<String, dynamic>>.from(data['iceServers']);
 
-        // Normalize ICE servers for flutter_webrtc
+        // Normalize ICE servers
         _iceServers = [];
         for (var server in rawServers) {
           final urls = server['urls'];
           final username = server['username'];
           final credential = server['credential'];
 
-          // If urls is an array, create separate entries for each URL
           if (urls is List) {
             for (var url in urls) {
               final entry = <String, dynamic>{'urls': url};
@@ -149,14 +213,7 @@ class WebRTCService extends ChangeNotifier {
           }
         }
 
-        debugPrint('[WebRTC] Got ${_iceServers!.length} ICE servers (normalized)');
-        for (var server in _iceServers!) {
-          final hasAuth = server.containsKey('username');
-          debugPrint('[WebRTC]   - ${server['urls']} (auth: $hasAuth)');
-          if (hasAuth) {
-            debugPrint('[WebRTC]     username: ${(server['username'] as String).substring(0, 20)}...');
-          }
-        }
+        debugPrint('[WebRTC] Got ${_iceServers!.length} ICE servers');
       }
     } catch (e) {
       debugPrint('[WebRTC] Failed to fetch TURN credentials: $e');
@@ -169,7 +226,6 @@ class WebRTCService extends ChangeNotifier {
 
   String _getWebSocketUrl(String url) {
     url = url.trim();
-
     if (url.startsWith('https://')) {
       return url.replaceFirst('https://', 'wss://');
     } else if (url.startsWith('http://')) {
@@ -181,14 +237,22 @@ class WebRTCService extends ChangeNotifier {
   }
 
   void _send(Map<String, dynamic> message) {
-    if (_channel != null) {
+    if (_channel == null) {
+      debugPrint('[WebRTC] Cannot send - no channel');
+      return;
+    }
+    try {
       final jsonStr = json.encode(message);
       debugPrint('[WebRTC] Sending: ${message['type']}');
       _channel!.sink.add(jsonStr);
+    } catch (e) {
+      debugPrint('[WebRTC] Send error: $e');
     }
   }
 
   void _onMessage(dynamic message) {
+    if (_isDisconnecting) return;
+
     try {
       final data = json.decode(message as String);
       final type = data['type'] as String?;
@@ -211,8 +275,6 @@ class WebRTCService extends ChangeNotifier {
         case 'streamer-disconnected':
           _updateState(StreamState.disconnected, 'Streamer disconnected');
           break;
-        default:
-          debugPrint('[WebRTC] Unknown message type: $type');
       }
     } catch (e) {
       debugPrint('[WebRTC] Error parsing message: $e');
@@ -223,7 +285,7 @@ class WebRTCService extends ChangeNotifier {
     _viewerId = data['viewer_id'] as String?;
     _broadcasterId = data['stream_id'] as String?;
     debugPrint('[WebRTC] Joined as $_viewerId, broadcaster: $_broadcasterId');
-    _updateState(StreamState.connecting, 'Joined, waiting for offer...');
+    _updateState(StreamState.connecting, 'Waiting for stream...');
   }
 
   void _handleError(Map<String, dynamic> data) {
@@ -233,43 +295,46 @@ class WebRTCService extends ChangeNotifier {
   }
 
   Future<void> _handleOffer(Map<String, dynamic> data) async {
-    debugPrint('[WebRTC] Received offer from ${data['from']}');
+    if (_isDisconnecting) return;
+
+    debugPrint('[WebRTC] Received offer');
     _broadcasterId = data['from'] as String? ?? _broadcasterId;
-    _updateState(StreamState.connecting, 'Received offer, creating answer...');
+    _updateState(StreamState.connecting, 'Setting up connection...');
 
     try {
+      // Close existing peer connection if any
+      if (_peerConnection != null) {
+        await _peerConnection!.close();
+        _peerConnection = null;
+      }
+
       final iceServers = _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}];
-      debugPrint('[WebRTC] Creating peer connection with ${iceServers.length} ICE servers');
 
       final config = <String, dynamic>{
         'iceServers': iceServers,
         'sdpSemantics': 'unified-plan',
-        // Try 'relay' to force TURN for debugging, 'all' for production
         'iceTransportPolicy': 'all',
       };
 
       _peerConnection = await createPeerConnection(config);
       debugPrint('[WebRTC] Peer connection created');
 
-      // Set up ALL event handlers FIRST
+      // Set up handlers
       _setupPeerConnectionHandlers();
 
-      // Set remote description (offer) - this enables ICE candidate processing
-      final offer = RTCSessionDescription(
-        data['sdp'] as String,
-        'offer',
-      );
+      // Set remote description
+      final offer = RTCSessionDescription(data['sdp'] as String, 'offer');
       await _peerConnection!.setRemoteDescription(offer);
       _remoteDescriptionSet = true;
       debugPrint('[WebRTC] Remote description set');
 
-      // Process any queued ICE candidates
+      // Process queued candidates
       await _processQueuedIceCandidates();
 
-      // Create and send answer
+      // Create answer
       final answer = await _peerConnection!.createAnswer();
       await _peerConnection!.setLocalDescription(answer);
-      debugPrint('[WebRTC] Local description set');
+      debugPrint('[WebRTC] Answer created');
 
       _send({
         'type': 'answer',
@@ -277,12 +342,11 @@ class WebRTCService extends ChangeNotifier {
         'sdp': answer.sdp,
       });
 
-      _updateState(StreamState.connecting, 'Answer sent, establishing connection...');
+      _updateState(StreamState.connecting, 'Establishing connection...');
 
-    } catch (e, stackTrace) {
+    } catch (e) {
       debugPrint('[WebRTC] Failed to handle offer: $e');
-      debugPrint('[WebRTC] Stack trace: $stackTrace');
-      _updateState(StreamState.failed, 'Failed to handle offer: $e');
+      _updateState(StreamState.failed, 'Setup failed');
     }
   }
 
@@ -290,98 +354,76 @@ class WebRTCService extends ChangeNotifier {
     if (_peerConnection == null) return;
 
     _peerConnection!.onIceConnectionState = (RTCIceConnectionState state) {
+      if (_isDisconnecting) return;
+
       final stateStr = state.toString().split('.').last;
       _updateIceState(stateStr);
-      debugPrint('[WebRTC] ############################################');
-      debugPrint('[WebRTC] ICE CONNECTION STATE: $stateStr');
-      debugPrint('[WebRTC] ############################################');
+      debugPrint('[WebRTC] ICE: $stateStr');
 
-      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
-          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-        debugPrint('[WebRTC] *** SUCCESS: MEDIA SHOULD BE FLOWING ***');
-        _updateState(StreamState.connected, 'Connected');
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-        debugPrint('[WebRTC] *** FAILED: ICE CONNECTION FAILED ***');
-        _updateState(StreamState.failed, 'ICE connection failed');
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-        debugPrint('[WebRTC] *** DISCONNECTED ***');
-        _updateState(StreamState.disconnected, 'Disconnected');
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateChecking) {
-        debugPrint('[WebRTC] ICE checking connectivity...');
-        _updateState(StreamState.connecting, 'Checking connectivity...');
+      switch (state) {
+        case RTCIceConnectionState.RTCIceConnectionStateConnected:
+        case RTCIceConnectionState.RTCIceConnectionStateCompleted:
+          debugPrint('[WebRTC] *** CONNECTED ***');
+          _updateState(StreamState.connected, 'Connected');
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateFailed:
+          debugPrint('[WebRTC] *** ICE FAILED ***');
+          _updateState(StreamState.failed, 'Connection failed');
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+          if (_connectionState == StreamState.connected) {
+            _updateState(StreamState.disconnected, 'Disconnected');
+          }
+          break;
+        case RTCIceConnectionState.RTCIceConnectionStateChecking:
+          _updateState(StreamState.connecting, 'Connecting...');
+          break;
+        default:
+          break;
       }
     };
 
     _peerConnection!.onIceCandidate = (RTCIceCandidate candidate) {
-      if (candidate.candidate == null || candidate.candidate!.isEmpty) {
-        debugPrint('[WebRTC] ICE gathering complete (null candidate)');
-        return;
-      }
+      if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
+      if (_broadcasterId == null) return;
 
-      final candidateStr = candidate.candidate!;
-      final isRelay = candidateStr.contains('typ relay');
-      debugPrint('[WebRTC] Local ICE: ${candidateStr.substring(0, candidateStr.length.clamp(0, 60))}... relay=$isRelay');
-
-      if (_broadcasterId != null) {
-        _send({
-          'type': 'ice-candidate',
-          'to': _broadcasterId,
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
-      }
-    };
-
-    _peerConnection!.onIceGatheringState = (RTCIceGatheringState state) {
-      debugPrint('[WebRTC] ICE gathering state: $state');
-      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-        debugPrint('[WebRTC] ICE gathering COMPLETE');
-      }
-    };
-
-    _peerConnection!.onConnectionState = (RTCPeerConnectionState state) {
-      debugPrint('[WebRTC] Peer connection state: $state');
-    };
-
-    _peerConnection!.onSignalingState = (RTCSignalingState state) {
-      debugPrint('[WebRTC] Signaling state: $state');
+      _send({
+        'type': 'ice-candidate',
+        'to': _broadcasterId,
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      });
     };
 
     _peerConnection!.onTrack = (RTCTrackEvent event) {
-      debugPrint('[WebRTC] *** GOT TRACK: ${event.track.kind} ***');
-      debugPrint('[WebRTC] Track ID: ${event.track.id}, enabled: ${event.track.enabled}');
+      debugPrint('[WebRTC] Track: ${event.track.kind}');
 
-      if (event.streams.isEmpty) {
-        debugPrint('[WebRTC] WARNING: No streams in track event!');
-        return;
-      }
+      if (event.streams.isEmpty) return;
 
       final stream = event.streams[0];
-      debugPrint('[WebRTC] Stream ID: ${stream.id}, tracks: ${stream.getTracks().length}');
 
-      // Only set srcObject for video tracks to prevent overwrite
       if (event.track.kind == 'video') {
-        debugPrint('[WebRTC] Setting VIDEO stream to renderer');
+        debugPrint('[WebRTC] Setting video stream');
         _remoteStream = stream;
-        _remoteRenderer.srcObject = stream;
+        if (_remoteRenderer != null) {
+          _remoteRenderer!.srcObject = stream;
+        }
         notifyListeners();
       } else if (event.track.kind == 'audio' && _remoteStream == null) {
-        debugPrint('[WebRTC] Setting AUDIO stream to renderer (no video yet)');
         _remoteStream = stream;
-        _remoteRenderer.srcObject = stream;
+        if (_remoteRenderer != null) {
+          _remoteRenderer!.srcObject = stream;
+        }
         notifyListeners();
-      } else {
-        debugPrint('[WebRTC] Audio track received, video stream already set');
       }
     };
 
     _peerConnection!.onAddStream = (MediaStream stream) {
-      debugPrint('[WebRTC] onAddStream: ${stream.id}, tracks: ${stream.getTracks().length}');
-      // This is deprecated but some implementations still use it
-      if (_remoteStream == null) {
+      debugPrint('[WebRTC] onAddStream: ${stream.getTracks().length} tracks');
+      if (_remoteStream == null && _remoteRenderer != null) {
         _remoteStream = stream;
-        _remoteRenderer.srcObject = stream;
+        _remoteRenderer!.srcObject = stream;
         notifyListeners();
       }
     };
@@ -390,28 +432,24 @@ class WebRTCService extends ChangeNotifier {
   Future<void> _processQueuedIceCandidates() async {
     if (_pendingIceCandidates.isEmpty) return;
 
-    debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} queued ICE candidates');
+    debugPrint('[WebRTC] Processing ${_pendingIceCandidates.length} queued candidates');
 
-    for (final data in _pendingIceCandidates) {
+    for (final data in List.from(_pendingIceCandidates)) {
       await _addIceCandidate(data);
     }
-
     _pendingIceCandidates.clear();
   }
 
   Future<void> _handleIceCandidate(Map<String, dynamic> data) async {
-    // If remote description not set yet, queue the candidate
     if (!_remoteDescriptionSet || _peerConnection == null) {
-      debugPrint('[WebRTC] Queueing ICE candidate (remote description not set yet)');
       _pendingIceCandidates.add(data);
       return;
     }
-
     await _addIceCandidate(data);
   }
 
   Future<void> _addIceCandidate(Map<String, dynamic> data) async {
-    if (_peerConnection == null) return;
+    if (_peerConnection == null || _isDisconnecting) return;
 
     try {
       String? candidateStr;
@@ -430,21 +468,13 @@ class WebRTCService extends ChangeNotifier {
         sdpMLineIndex = candidateData['sdpMLineIndex'] as int?;
       }
 
-      if (candidateStr == null || candidateStr.isEmpty) {
-        debugPrint('[WebRTC] Skipping empty ICE candidate');
-        return;
-      }
+      if (candidateStr == null || candidateStr.isEmpty) return;
 
-      // Ensure sdpMid has a value
       sdpMid ??= sdpMLineIndex?.toString() ?? '0';
       sdpMLineIndex ??= 0;
 
-      final isRelay = candidateStr.contains('typ relay');
-      debugPrint('[WebRTC] Adding remote ICE: ${candidateStr.substring(0, candidateStr.length.clamp(0, 50))}... relay=$isRelay');
-
       final candidate = RTCIceCandidate(candidateStr, sdpMid, sdpMLineIndex);
       await _peerConnection!.addCandidate(candidate);
-      debugPrint('[WebRTC] Remote ICE candidate added successfully');
     } catch (e) {
       debugPrint('[WebRTC] Error adding ICE candidate: $e');
     }
@@ -463,55 +493,88 @@ class WebRTCService extends ChangeNotifier {
   }
 
   void _applyMediaState() {
-    final stream = _remoteRenderer.srcObject;
+    final stream = _remoteRenderer?.srcObject;
     if (stream == null) return;
 
     for (final track in stream.getAudioTracks()) {
       track.enabled = _audioEnabled;
     }
-
     for (final track in stream.getVideoTracks()) {
       track.enabled = _videoEnabled;
     }
   }
 
+  /// Disconnect from stream
   Future<void> disconnect() async {
+    if (_isDisconnecting) return;
+
+    debugPrint('[WebRTC] Disconnecting...');
+    _isDisconnecting = true;
     _updateState(StreamState.disconnected, 'Disconnected');
-    await _cleanup();
+
+    await _cleanupInternal();
+    _isDisconnecting = false;
   }
 
-  Future<void> refresh() async {
-    if (_currentUrl == null) return;
+  /// Refresh connection - disconnect and reconnect
+  Future<bool> refresh() async {
+    if (_currentUrl == null) return false;
 
-    await _cleanup();
-    await Future.delayed(const Duration(milliseconds: 500));
-    await connect(_currentUrl!, streamId: _currentStreamId ?? 'pi-camera-stream');
+    debugPrint('[WebRTC] Refreshing connection...');
+
+    final url = _currentUrl!;
+    final streamId = _currentStreamId ?? 'pi-camera-stream';
+
+    await disconnect();
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    return connect(url, streamId: streamId);
   }
 
-  Future<void> _cleanup() async {
+  /// Internal cleanup - closes all resources
+  Future<void> _cleanupInternal() async {
+    debugPrint('[WebRTC] Cleaning up...');
+
+    // Cancel WebSocket subscription
+    await _channelSubscription?.cancel();
+    _channelSubscription = null;
+
+    // Close WebSocket
     try {
-      _channel?.sink.close();
-      _channel = null;
-
-      _remoteRenderer.srcObject = null;
-      _remoteStream = null;
-
-      await _peerConnection?.close();
-      _peerConnection = null;
-
-      _viewerId = null;
-      _broadcasterId = null;
-      _remoteDescriptionSet = false;
-      _pendingIceCandidates.clear();
+      await _channel?.sink.close();
     } catch (e) {
-      debugPrint('[WebRTC] Cleanup error: $e');
+      debugPrint('[WebRTC] Error closing channel: $e');
     }
+    _channel = null;
+
+    // Clear renderer
+    if (_remoteRenderer != null) {
+      _remoteRenderer!.srcObject = null;
+    }
+    _remoteStream = null;
+
+    // Close peer connection
+    try {
+      await _peerConnection?.close();
+    } catch (e) {
+      debugPrint('[WebRTC] Error closing peer connection: $e');
+    }
+    _peerConnection = null;
+
+    // Reset state
+    _viewerId = null;
+    _broadcasterId = null;
+    _remoteDescriptionSet = false;
+    _pendingIceCandidates.clear();
+
+    debugPrint('[WebRTC] Cleanup complete');
   }
 
   @override
   void dispose() {
-    _cleanup();
-    _remoteRenderer.dispose();
+    _isDisconnecting = true;
+    _cleanupInternal();
+    _remoteRenderer?.dispose();
     super.dispose();
   }
 }

@@ -159,10 +159,35 @@ function handleRegister(ws, data) {
 
 function handleJoin(ws, data) {
     const streamId = data.stream_id;
+
+    // Check if this WebSocket already has a viewer - clean up old one first
+    const connInfo = connections.get(ws);
+    if (connInfo && connInfo.clientRole === 'viewer' && connInfo.clientId) {
+        const oldViewerId = connInfo.clientId;
+        console.log(`[JOIN] WebSocket already has viewer ${oldViewerId}, cleaning up before rejoin`);
+
+        // Clean up old viewer from previous stream
+        const oldViewer = viewers.get(oldViewerId);
+        if (oldViewer) {
+            const oldBroadcaster = broadcasters.get(oldViewer.broadcasterId);
+            if (oldBroadcaster) {
+                oldBroadcaster.viewers.delete(oldViewerId);
+                try {
+                    oldBroadcaster.ws.send(JSON.stringify({
+                        type: 'viewer-left',
+                        viewer_id: oldViewerId
+                    }));
+                } catch (e) {
+                    // Ignore send errors
+                }
+            }
+            viewers.delete(oldViewerId);
+        }
+    }
+
     const viewerId = 'viewer-' + nextViewerId++;
 
     // Update connection info
-    const connInfo = connections.get(ws);
     if (connInfo) {
         connInfo.clientId = viewerId;
         connInfo.clientRole = 'viewer';

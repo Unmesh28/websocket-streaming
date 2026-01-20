@@ -84,22 +84,39 @@ class _StreamViewerScreenState extends State<StreamViewerScreen> {
   Widget _buildVideoView() {
     return Consumer<WebRTCService>(
       builder: (context, service, _) {
+        final renderer = service.remoteRenderer;
+        final hasVideo = renderer != null && service.isConnected;
+
         return Stack(
           fit: StackFit.expand,
           children: [
             // Video renderer
             Container(
               color: Colors.black,
-              child: service.isConnected
+              child: hasVideo
                   ? RTCVideoView(
-                      service.remoteRenderer,
+                      renderer,
                       objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                     )
-                  : const Center(
-                      child: Icon(
-                        Icons.videocam_off,
-                        size: 64,
-                        color: Colors.grey,
+                  : Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            service.connectionState == StreamState.connecting
+                                ? Icons.sync
+                                : Icons.videocam_off,
+                            size: 64,
+                            color: Colors.grey,
+                          ),
+                          if (service.connectionState == StreamState.connecting)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 16),
+                              child: CircularProgressIndicator(
+                                color: Colors.blue,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
             ),
