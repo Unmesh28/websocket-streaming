@@ -131,7 +131,21 @@ private:
     gulong video_queue_src_probe_id_;
 
     bool cleaned_up_;               // Prevent double cleanup
+    std::atomic<int> cleanup_removing_;  // Atomic guard for probe callback (0=not removing, 1=removing)
     std::mutex cleanup_mutex_;      // Thread safety for cleanup
+
+    // Cleanup context for IDLE probe pattern
+    struct CleanupContext {
+        WebRTCPeer* peer;
+        bool is_video;  // true for video path, false for audio path
+        GCond cond;
+        GMutex mutex;
+        bool done;
+    };
+
+    // Helper methods for cleanup
+    void doCleanupInProbe(bool is_video);
+    static GstPadProbeReturn cleanupIdleProbeCallback(GstPad* pad, GstPadProbeInfo* info, gpointer user_data);
 
     // ICE candidate queuing to prevent libnice crashes
     struct IceCandidate {
