@@ -120,6 +120,9 @@ class WebRTCService extends ChangeNotifier {
         final data = json.decode(response.body);
         _iceServers = List<Map<String, dynamic>>.from(data['iceServers']);
         debugPrint('[WebRTC] Got ${_iceServers!.length} ICE servers');
+        for (var server in _iceServers!) {
+          debugPrint('[WebRTC] ICE server: ${server['urls']}');
+        }
       }
     } catch (e) {
       debugPrint('[WebRTC] Failed to fetch TURN credentials: $e');
@@ -201,8 +204,14 @@ class WebRTCService extends ChangeNotifier {
 
     try {
       // Create peer connection
+      final iceServers = _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}];
+      debugPrint('[WebRTC] Creating peer connection with ${iceServers.length} ICE servers');
+      for (var server in iceServers) {
+        debugPrint('[WebRTC]   - ${server['urls']}');
+      }
+
       final config = {
-        'iceServers': _iceServers ?? [{'urls': 'stun:stun.l.google.com:19302'}],
+        'iceServers': iceServers,
         'sdpSemantics': 'unified-plan',
       };
 
