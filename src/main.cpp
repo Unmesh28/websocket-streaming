@@ -1,5 +1,6 @@
 #include "shared_media_pipeline.h"
 #include "signaling_client.h"
+#include "cloudflare_turn.h"
 #include <iostream>
 #include <signal.h>
 #include <map>
@@ -222,20 +223,37 @@ int main(int argc, char* argv[]) {
         ? "CSI (Pi Camera Module)"
         : "USB (" + video_device + ")";
 
-    // Check for TURN server configuration from environment variables
-    // TURN is CRITICAL for NAT traversal when viewers are on different networks
-    const char* turn_uri_env = std::getenv("TURN_SERVER");
-    const char* turn_user_env = std::getenv("TURN_USERNAME");
-    const char* turn_pass_env = std::getenv("TURN_PASSWORD");
-
+    // Check for TURN server configuration
+    // Priority: 1. Cloudflare TURN (dynamic credentials)
+    //           2. Static TURN server from environment
     std::string turn_display = "Not configured";
-    if (turn_uri_env && turn_uri_env[0]) {
-        WebRTCPeer::TurnConfig turn_config;
-        turn_config.uri = turn_uri_env;
-        if (turn_user_env) turn_config.username = turn_user_env;
-        if (turn_pass_env) turn_config.password = turn_pass_env;
-        WebRTCPeer::setTurnServer(turn_config);
-        turn_display = turn_config.uri;
+
+    // Try Cloudflare TURN first (from .env file or environment)
+    if (CloudflareTurn::instance().loadConfigFromEnv()) {
+        // Test fetching credentials to validate configuration
+        auto creds = CloudflareTurn::instance().getCredentials();
+        if (creds.valid) {
+            WebRTCPeer::enableCloudflareTurn();
+            turn_display = "Cloudflare TURN (dynamic credentials)";
+        } else {
+            std::cerr << "Warning: Cloudflare TURN configured but failed to fetch credentials" << std::endl;
+        }
+    }
+
+    // Fallback to static TURN server from environment if Cloudflare not configured
+    if (!WebRTCPeer::isUsingCloudflareTurn()) {
+        const char* turn_uri_env = std::getenv("TURN_SERVER");
+        const char* turn_user_env = std::getenv("TURN_USERNAME");
+        const char* turn_pass_env = std::getenv("TURN_PASSWORD");
+
+        if (turn_uri_env && turn_uri_env[0]) {
+            WebRTCPeer::TurnConfig turn_config;
+            turn_config.uri = turn_uri_env;
+            if (turn_user_env) turn_config.username = turn_user_env;
+            if (turn_pass_env) turn_config.password = turn_pass_env;
+            WebRTCPeer::setTurnServer(turn_config);
+            turn_display = turn_config.uri;
+        }
     }
 
     std::cout << "\n=====================================" << std::endl;

@@ -85,6 +85,12 @@ public:
     // Set TURN server (must be called before initialize())
     static void setTurnServer(const TurnConfig& config);
 
+    // Enable Cloudflare TURN (dynamic credentials)
+    static void enableCloudflareTurn();
+
+    // Check if using Cloudflare TURN
+    static bool isUsingCloudflareTurn();
+
     // Create offer for WebRTC negotiation
     void createOffer(std::function<void(const std::string&)> callback);
 
@@ -142,6 +148,7 @@ private:
     // Static TURN server config (shared by all peers)
     static TurnConfig turn_config_;
     static bool turn_configured_;
+    static bool use_cloudflare_turn_;
 
     // GStreamer callbacks
     static void onNegotiationNeeded(GstElement* webrtc, gpointer user_data);

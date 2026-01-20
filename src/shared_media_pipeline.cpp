@@ -1,4 +1,5 @@
 #include "shared_media_pipeline.h"
+#include "cloudflare_turn.h"
 #include <gst/sdp/sdp.h>
 #include <gst/webrtc/webrtc.h>
 #include <gst/video/video.h>
@@ -417,13 +418,25 @@ static GstPadProbeReturn webrtc_buffer_probe(GstPad* pad, GstPadProbeInfo* info,
 // Static TURN configuration
 WebRTCPeer::TurnConfig WebRTCPeer::turn_config_;
 bool WebRTCPeer::turn_configured_ = false;
+bool WebRTCPeer::use_cloudflare_turn_ = false;
 
 void WebRTCPeer::setTurnServer(const TurnConfig& config) {
     turn_config_ = config;
     turn_configured_ = !config.uri.empty();
+    use_cloudflare_turn_ = false;  // Disable Cloudflare if using static config
     if (turn_configured_) {
         LOG("TURN", "TURN server configured: " << config.uri);
     }
+}
+
+void WebRTCPeer::enableCloudflareTurn() {
+    use_cloudflare_turn_ = true;
+    turn_configured_ = true;  // Mark as configured
+    LOG("TURN", "Cloudflare TURN enabled - credentials will be fetched dynamically");
+}
+
+bool WebRTCPeer::isUsingCloudflareTurn() {
+    return use_cloudflare_turn_;
 }
 
 WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
@@ -475,20 +488,38 @@ bool WebRTCPeer::initialize() {
 
     // Add TURN server if configured (critical for NAT traversal)
     if (turn_configured_) {
-        std::string turn_uri = turn_config_.uri;
-        // Format: turn://username:password@server:port or turns:// for TLS
-        if (!turn_config_.username.empty()) {
-            // Insert credentials into URI
-            size_t pos = turn_uri.find("://");
-            if (pos != std::string::npos) {
-                turn_uri = turn_uri.substr(0, pos + 3) +
-                          turn_config_.username + ":" +
-                          turn_config_.password + "@" +
-                          turn_uri.substr(pos + 3);
+        std::string turn_uri;
+
+        if (use_cloudflare_turn_) {
+            // Fetch dynamic credentials from Cloudflare
+            LOG("PEER", "Fetching Cloudflare TURN credentials for: " << viewer_id_);
+            turn_uri = CloudflareTurn::instance().getTurnUri();
+            if (turn_uri.empty()) {
+                LOG("PEER-ERROR", "Failed to get Cloudflare TURN credentials!");
+            } else {
+                // Log without credentials for security
+                LOG("PEER", "Using Cloudflare TURN: turn.cloudflare.com:3478");
             }
+        } else {
+            // Use static TURN configuration
+            turn_uri = turn_config_.uri;
+            // Format: turn://username:password@server:port or turns:// for TLS
+            if (!turn_config_.username.empty()) {
+                // Insert credentials into URI
+                size_t pos = turn_uri.find("://");
+                if (pos != std::string::npos) {
+                    turn_uri = turn_uri.substr(0, pos + 3) +
+                              turn_config_.username + ":" +
+                              turn_config_.password + "@" +
+                              turn_uri.substr(pos + 3);
+                }
+            }
+            LOG("PEER", "Setting TURN server: " << turn_config_.uri);
         }
-        LOG("PEER", "Setting TURN server: " << turn_config_.uri);
-        g_object_set(webrtcbin_, "turn-server", turn_uri.c_str(), nullptr);
+
+        if (!turn_uri.empty()) {
+            g_object_set(webrtcbin_, "turn-server", turn_uri.c_str(), nullptr);
+        }
     } else {
         LOG("PEER-WARN", "No TURN server configured - NAT traversal may fail for remote viewers");
     }
