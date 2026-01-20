@@ -900,16 +900,45 @@ void WebRTCPeer::cleanup() {
     // CRITICAL: Must wait for state change to complete to allow libnice to cleanup TURN
     LOG("PEER", "Setting elements to NULL state...");
 
+    // First, send flush events to queues to clear any pending data
+    // This prevents blocking when setting to NULL with full queues (when ICE never connected)
+    if (video_queue_) {
+        GstPad* sink = gst_element_get_static_pad(video_queue_, "sink");
+        if (sink) {
+            gst_pad_send_event(sink, gst_event_new_flush_start());
+            gst_pad_send_event(sink, gst_event_new_flush_stop(FALSE));
+            gst_object_unref(sink);
+        }
+        LOG("PEER", "Flushed video queue");
+    }
+    if (audio_queue_) {
+        GstPad* sink = gst_element_get_static_pad(audio_queue_, "sink");
+        if (sink) {
+            gst_pad_send_event(sink, gst_event_new_flush_start());
+            gst_pad_send_event(sink, gst_event_new_flush_stop(FALSE));
+            gst_object_unref(sink);
+        }
+        LOG("PEER", "Flushed audio queue");
+    }
+
+    // Set queues to NULL with timeout (don't block forever if queues are stuck)
     if (video_queue_) {
         gst_element_set_state(video_queue_, GST_STATE_NULL);
-        gst_element_get_state(video_queue_, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+        GstStateChangeReturn ret = gst_element_get_state(video_queue_, nullptr, nullptr, 500 * GST_MSECOND);
+        if (ret != GST_STATE_CHANGE_SUCCESS) {
+            LOG("PEER-WARN", "video_queue state change timeout, continuing anyway");
+        }
     }
     if (audio_queue_) {
         gst_element_set_state(audio_queue_, GST_STATE_NULL);
-        gst_element_get_state(audio_queue_, nullptr, nullptr, GST_CLOCK_TIME_NONE);
+        GstStateChangeReturn ret = gst_element_get_state(audio_queue_, nullptr, nullptr, 500 * GST_MSECOND);
+        if (ret != GST_STATE_CHANGE_SUCCESS) {
+            LOG("PEER-WARN", "audio_queue state change timeout, continuing anyway");
+        }
     }
+
+    // webrtcbin cleanup - this is the critical one with ICE agent
     if (webrtcbin_) {
-        // This is the critical one - webrtcbin contains the ICE agent with TURN refreshes
         LOG("PEER", "Setting webrtcbin to NULL (this triggers ICE/TURN cleanup)...");
         gst_element_set_state(webrtcbin_, GST_STATE_NULL);
         // Wait up to 2 seconds for webrtcbin to fully cleanup (includes ICE agent)
@@ -917,18 +946,16 @@ void WebRTCPeer::cleanup() {
         if (ret == GST_STATE_CHANGE_SUCCESS) {
             LOG("PEER", "webrtcbin state change to NULL completed successfully");
         } else if (ret == GST_STATE_CHANGE_ASYNC) {
-            LOG("PEER-WARN", "webrtcbin state change still pending - waiting more...");
-            // Wait a bit more for async cleanup
-            g_usleep(200000);  // 200ms
+            LOG("PEER-WARN", "webrtcbin state change still pending after 2s");
         } else {
             LOG("PEER-WARN", "webrtcbin state change returned: " << ret);
         }
     }
 
-    // Small delay to let libnice finish any remaining TURN refresh cleanup
-    // This addresses the "We still have alive TURN refreshes" warning
-    LOG("PEER", "Brief delay for ICE agent cleanup...");
-    g_usleep(100000);  // 100ms
+    // Longer delay to let libnice finish TURN refresh cleanup
+    // The warning about "alive TURN refreshes" indicates we need more time
+    LOG("PEER", "Delay for ICE agent cleanup (300ms)...");
+    g_usleep(300000);  // 300ms - increased from 100ms
 
     // Remove elements from pipeline
     LOG("PEER", "Removing elements from pipeline...");
