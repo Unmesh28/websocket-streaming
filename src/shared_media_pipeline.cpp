@@ -456,6 +456,10 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , audio_tee_pad_(nullptr)
     , webrtc_video_sink_(nullptr)
     , webrtc_audio_sink_(nullptr)
+    , audio_decodebin_(nullptr)
+    , audio_convert_(nullptr)
+    , audio_resample_(nullptr)
+    , audio_sink_(nullptr)
     , video_tee_probe_id_(0)
     , video_queue_sink_probe_id_(0)
     , video_queue_src_probe_id_(0)
@@ -750,6 +754,13 @@ bool WebRTCPeer::initialize() {
     g_signal_connect(webrtcbin_, "notify::ice-gathering-state",
                     G_CALLBACK(onIceGatheringStateChange), this);
 
+    // Connect pad-added signal to receive incoming audio from viewer (push-to-talk)
+    g_signal_connect(webrtcbin_, "pad-added",
+                    G_CALLBACK(onPadAdded), this);
+
+    // Setup audio playback pipeline for receiving viewer's audio
+    setupAudioPlayback();
+
     LOG_VAR("PEER", "Peer initialized successfully: ", viewer_id_);
     return true;
 }
@@ -953,6 +964,44 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         }
     }
     audio_queue_ = nullptr;
+
+    // STEP 6: Cleanup audio playback elements (for incoming viewer audio)
+    LOG("PEER", "Cleaning up audio playback elements...");
+    if (audio_sink_ && GST_IS_ELEMENT(audio_sink_)) {
+        gst_element_set_state(audio_sink_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(audio_sink_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), audio_sink_);
+        }
+    }
+    audio_sink_ = nullptr;
+
+    if (audio_resample_ && GST_IS_ELEMENT(audio_resample_)) {
+        gst_element_set_state(audio_resample_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(audio_resample_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), audio_resample_);
+        }
+    }
+    audio_resample_ = nullptr;
+
+    if (audio_convert_ && GST_IS_ELEMENT(audio_convert_)) {
+        gst_element_set_state(audio_convert_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(audio_convert_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), audio_convert_);
+        }
+    }
+    audio_convert_ = nullptr;
+
+    if (audio_decodebin_ && GST_IS_ELEMENT(audio_decodebin_)) {
+        gst_element_set_state(audio_decodebin_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(audio_decodebin_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), audio_decodebin_);
+        }
+    }
+    audio_decodebin_ = nullptr;
 
     LOG("PEER", "Full cleanup complete for: " << viewer_id_);
 }
@@ -1356,4 +1405,162 @@ void WebRTCPeer::onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec
 void WebRTCPeer::setIceCandidateCallback(
     std::function<void(const std::string&, int)> callback) {
     ice_candidate_callback_ = callback;
+}
+
+// Setup audio playback pipeline for receiving viewer's audio (push-to-talk)
+void WebRTCPeer::setupAudioPlayback() {
+    LOG("PEER-AUDIO", "Setting up audio playback for: " << viewer_id_);
+
+    // Create elements for audio playback
+    std::string decodebin_name = "audio_decodebin_" + viewer_id_;
+    std::string convert_name = "audio_convert_" + viewer_id_;
+    std::string resample_name = "audio_resample_" + viewer_id_;
+    std::string sink_name = "audio_sink_" + viewer_id_;
+
+    audio_decodebin_ = gst_element_factory_make("decodebin", decodebin_name.c_str());
+    audio_convert_ = gst_element_factory_make("audioconvert", convert_name.c_str());
+    audio_resample_ = gst_element_factory_make("audioresample", resample_name.c_str());
+    audio_sink_ = gst_element_factory_make("alsasink", sink_name.c_str());
+
+    if (!audio_decodebin_ || !audio_convert_ || !audio_resample_ || !audio_sink_) {
+        LOG("PEER-AUDIO-ERROR", "Failed to create audio playback elements for: " << viewer_id_);
+        // Cleanup any created elements
+        if (audio_decodebin_) { gst_object_unref(audio_decodebin_); audio_decodebin_ = nullptr; }
+        if (audio_convert_) { gst_object_unref(audio_convert_); audio_convert_ = nullptr; }
+        if (audio_resample_) { gst_object_unref(audio_resample_); audio_resample_ = nullptr; }
+        if (audio_sink_) { gst_object_unref(audio_sink_); audio_sink_ = nullptr; }
+        return;
+    }
+
+    // Configure alsasink
+    g_object_set(audio_sink_,
+                 "sync", FALSE,  // Don't sync to clock (reduce latency)
+                 nullptr);
+
+    // Add elements to pipeline
+    gst_bin_add_many(GST_BIN(pipeline_), audio_decodebin_, audio_convert_,
+                     audio_resample_, audio_sink_, nullptr);
+
+    // Link convert -> resample -> sink (decodebin is dynamic, linked in pad-added)
+    if (!gst_element_link_many(audio_convert_, audio_resample_, audio_sink_, nullptr)) {
+        LOG("PEER-AUDIO-ERROR", "Failed to link audio playback pipeline for: " << viewer_id_);
+        return;
+    }
+
+    // Connect decodebin pad-added signal
+    g_signal_connect(audio_decodebin_, "pad-added",
+                    G_CALLBACK(onDecodebinPadAdded), this);
+
+    // Sync states with parent
+    gst_element_sync_state_with_parent(audio_decodebin_);
+    gst_element_sync_state_with_parent(audio_convert_);
+    gst_element_sync_state_with_parent(audio_resample_);
+    gst_element_sync_state_with_parent(audio_sink_);
+
+    LOG("PEER-AUDIO", "Audio playback pipeline setup complete for: " << viewer_id_);
+}
+
+// Callback for incoming pads from webrtcbin (viewer's audio)
+void WebRTCPeer::onPadAdded(GstElement* webrtc, GstPad* pad, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    // Check if this is a src pad (incoming media from viewer)
+    GstPadDirection dir = gst_pad_get_direction(pad);
+    if (dir != GST_PAD_SRC) {
+        return;
+    }
+
+    // Get pad caps to determine media type
+    GstCaps* caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        caps = gst_pad_query_caps(pad, nullptr);
+    }
+
+    if (!caps) {
+        LOG("PEER-AUDIO-WARN", "No caps on incoming pad for: " << peer->viewer_id_);
+        return;
+    }
+
+    gchar* caps_str = gst_caps_to_string(caps);
+    LOG("PEER-AUDIO", "Incoming pad added for " << peer->viewer_id_ << ": " << caps_str);
+
+    // Check if this is audio
+    GstStructure* structure = gst_caps_get_structure(caps, 0);
+    const gchar* media_type = gst_structure_get_name(structure);
+
+    if (g_str_has_prefix(media_type, "application/x-rtp")) {
+        // Check encoding-name for audio
+        const gchar* encoding = gst_structure_get_string(structure, "encoding-name");
+        const gchar* media = gst_structure_get_string(structure, "media");
+
+        if (media && g_strcmp0(media, "audio") == 0) {
+            LOG("PEER-AUDIO", ">>> Received incoming AUDIO from viewer: " << peer->viewer_id_
+                << " (encoding: " << (encoding ? encoding : "unknown") << ")");
+
+            // Link to decodebin if it exists
+            if (peer->audio_decodebin_) {
+                GstPad* decodebin_sink = gst_element_get_static_pad(peer->audio_decodebin_, "sink");
+                if (decodebin_sink) {
+                    if (!gst_pad_is_linked(decodebin_sink)) {
+                        GstPadLinkReturn ret = gst_pad_link(pad, decodebin_sink);
+                        if (ret == GST_PAD_LINK_OK) {
+                            LOG("PEER-AUDIO", "Linked incoming audio to decodebin for: " << peer->viewer_id_);
+                        } else {
+                            LOG("PEER-AUDIO-ERROR", "Failed to link incoming audio, ret: " << ret);
+                        }
+                    }
+                    gst_object_unref(decodebin_sink);
+                }
+            }
+        } else if (media) {
+            LOG("PEER-AUDIO", "Received incoming " << media << " pad (ignored): " << peer->viewer_id_);
+        }
+    }
+
+    g_free(caps_str);
+    gst_caps_unref(caps);
+}
+
+// Callback for decodebin pad-added (decoded audio ready)
+void WebRTCPeer::onDecodebinPadAdded(GstElement* decodebin, GstPad* pad, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    // Check if this is audio
+    GstCaps* caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        caps = gst_pad_query_caps(pad, nullptr);
+    }
+
+    if (!caps) {
+        return;
+    }
+
+    gchar* caps_str = gst_caps_to_string(caps);
+    LOG("PEER-AUDIO", "Decodebin pad added for " << peer->viewer_id_ << ": " << caps_str);
+
+    GstStructure* structure = gst_caps_get_structure(caps, 0);
+    const gchar* media_type = gst_structure_get_name(structure);
+
+    if (g_str_has_prefix(media_type, "audio/")) {
+        LOG("PEER-AUDIO", ">>> Decoded audio ready, linking to playback for: " << peer->viewer_id_);
+
+        // Link to audioconvert
+        if (peer->audio_convert_) {
+            GstPad* convert_sink = gst_element_get_static_pad(peer->audio_convert_, "sink");
+            if (convert_sink) {
+                if (!gst_pad_is_linked(convert_sink)) {
+                    GstPadLinkReturn ret = gst_pad_link(pad, convert_sink);
+                    if (ret == GST_PAD_LINK_OK) {
+                        LOG("PEER-AUDIO", "Audio playback active for: " << peer->viewer_id_);
+                    } else {
+                        LOG("PEER-AUDIO-ERROR", "Failed to link decoded audio, ret: " << ret);
+                    }
+                }
+                gst_object_unref(convert_sink);
+            }
+        }
+    }
+
+    g_free(caps_str);
+    gst_caps_unref(caps);
 }

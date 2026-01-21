@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class WebViewerScreen extends StatefulWidget {
   final String initialUrl;
@@ -20,6 +21,7 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
   bool _isLoading = false;
   int _loadingProgress = 0;
   bool _hasLoadedUrl = false;
+  bool _micPermissionGranted = false;
 
   @override
   void initState() {
@@ -27,11 +29,26 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
     WidgetsBinding.instance.addObserver(this);
     _urlController.text = widget.initialUrl;
 
+    // Request microphone permission early
+    _requestMicPermission();
+
     // Only auto-load if we have a real URL
     if (widget.initialUrl.isNotEmpty &&
         widget.initialUrl != 'https://' &&
         widget.initialUrl != 'http://') {
       _initWebView(widget.initialUrl);
+    }
+  }
+
+  Future<void> _requestMicPermission() async {
+    final status = await Permission.microphone.request();
+    setState(() {
+      _micPermissionGranted = status.isGranted;
+    });
+    if (status.isGranted) {
+      debugPrint('[WebView] Microphone permission granted');
+    } else {
+      debugPrint('[WebView] Microphone permission denied');
     }
   }
 
@@ -91,10 +108,35 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
       )
       ..loadRequest(Uri.parse(url));
 
-    // Enable hardware acceleration on Android
+    // Enable hardware acceleration and microphone on Android
     if (controller.platform is AndroidWebViewController) {
-      (controller.platform as AndroidWebViewController)
-        ..setMediaPlaybackRequiresUserGesture(false);
+      final androidController = controller.platform as AndroidWebViewController;
+      androidController.setMediaPlaybackRequiresUserGesture(false);
+
+      // Handle permission requests from JavaScript (microphone, camera)
+      androidController.setOnPlatformPermissionRequest((request) async {
+        debugPrint('[WebView] Permission request: ${request.types}');
+
+        // Check if microphone permission is requested
+        if (request.types.contains(WebViewPermissionResourceType.microphone)) {
+          if (_micPermissionGranted) {
+            debugPrint('[WebView] Granting microphone permission to WebView');
+            request.grant();
+          } else {
+            // Try to request permission again
+            final status = await Permission.microphone.request();
+            if (status.isGranted) {
+              setState(() => _micPermissionGranted = true);
+              request.grant();
+            } else {
+              request.deny();
+            }
+          }
+        } else {
+          // Grant other permissions (like camera if needed)
+          request.grant();
+        }
+      });
     }
 
     _controller = controller;
@@ -155,6 +197,16 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
         foregroundColor: Colors.white,
         automaticallyImplyLeading: false,
         actions: [
+          // Microphone status indicator
+          if (_hasLoadedUrl)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Icon(
+                _micPermissionGranted ? Icons.mic : Icons.mic_off,
+                color: _micPermissionGranted ? Colors.green : Colors.red,
+                size: 20,
+              ),
+            ),
           if (_hasLoadedUrl) ...[
             IconButton(
               icon: const Icon(Icons.refresh),
@@ -255,6 +307,14 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
                             style: TextStyle(
                               color: Colors.white38,
                               fontSize: 14,
+                            ),
+                          ),
+                          SizedBox(height: 16),
+                          Text(
+                            'Push-to-talk enabled',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: 12,
                             ),
                           ),
                         ],
