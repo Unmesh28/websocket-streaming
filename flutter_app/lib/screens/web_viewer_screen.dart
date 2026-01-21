@@ -14,21 +14,26 @@ class WebViewerScreen extends StatefulWidget {
 }
 
 class _WebViewerScreenState extends State<WebViewerScreen> {
-  late final WebViewController _controller;
+  WebViewController? _controller;
   final TextEditingController _urlController = TextEditingController();
-  bool _isLoading = true;
-  String _currentUrl = '';
+  bool _isLoading = false;
   int _loadingProgress = 0;
+  bool _hasLoadedUrl = false;
 
   @override
   void initState() {
     super.initState();
-    _currentUrl = widget.initialUrl;
     _urlController.text = widget.initialUrl;
-    _initWebView();
+
+    // Only auto-load if we have a real URL
+    if (widget.initialUrl.isNotEmpty &&
+        widget.initialUrl != 'https://' &&
+        widget.initialUrl != 'http://') {
+      _initWebView(widget.initialUrl);
+    }
   }
 
-  void _initWebView() {
+  void _initWebView(String url) {
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
@@ -42,25 +47,24 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
           onPageStarted: (String url) {
             setState(() {
               _isLoading = true;
-              _currentUrl = url;
             });
           },
           onPageFinished: (String url) {
             setState(() {
               _isLoading = false;
-              _currentUrl = url;
+              _hasLoadedUrl = true;
             });
           },
           onWebResourceError: (WebResourceError error) {
             debugPrint('[WebView] Error: ${error.description}');
           },
-          onNavigationRequest: (NavigationRequest request) {
-            // Allow all navigation
-            return NavigationDecision.navigate;
-          },
         ),
       )
-      ..loadRequest(Uri.parse(_currentUrl));
+      ..loadRequest(Uri.parse(url));
+
+    setState(() {
+      _hasLoadedUrl = true;
+    });
   }
 
   void _loadUrl() {
@@ -70,17 +74,22 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
     // Ensure URL has protocol
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       url = 'https://$url';
+      _urlController.text = url;
     }
 
     setState(() {
-      _currentUrl = url;
       _isLoading = true;
     });
-    _controller.loadRequest(Uri.parse(url));
+
+    if (_controller == null) {
+      _initWebView(url);
+    } else {
+      _controller!.loadRequest(Uri.parse(url));
+    }
   }
 
   void _refresh() {
-    _controller.reload();
+    _controller?.reload();
   }
 
   @override
@@ -93,15 +102,17 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Web Viewer'),
+        title: const Text('Live Stream'),
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
+        automaticallyImplyLeading: false, // No back button on home screen
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
-            tooltip: 'Refresh',
-          ),
+          if (_hasLoadedUrl)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _refresh,
+              tooltip: 'Refresh',
+            ),
         ],
       ),
       body: Column(
@@ -109,16 +120,16 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
           // URL input bar
           Container(
             padding: const EdgeInsets.all(8),
-            color: Colors.grey[200],
+            color: Colors.grey[900],
             child: Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: _urlController,
                     decoration: InputDecoration(
-                      hintText: 'Enter server URL',
+                      hintText: 'Enter server URL (e.g., https://xxx.trycloudflare.com)',
                       filled: true,
-                      fillColor: Colors.white,
+                      fillColor: Colors.grey[800],
                       contentPadding: const EdgeInsets.symmetric(
                         horizontal: 12,
                         vertical: 8,
@@ -127,8 +138,10 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide.none,
                       ),
-                      prefixIcon: const Icon(Icons.link, size: 20),
+                      prefixIcon: const Icon(Icons.link, size: 20, color: Colors.white70),
+                      hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
                     ),
+                    style: const TextStyle(color: Colors.white),
                     keyboardType: TextInputType.url,
                     textInputAction: TextInputAction.go,
                     onSubmitted: (_) => _loadUrl(),
@@ -141,7 +154,7 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
                     backgroundColor: Colors.deepPurple,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
+                      horizontal: 20,
                       vertical: 12,
                     ),
                   ),
@@ -155,13 +168,37 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
           if (_isLoading)
             LinearProgressIndicator(
               value: _loadingProgress / 100,
-              backgroundColor: Colors.grey[300],
+              backgroundColor: Colors.grey[800],
               valueColor: const AlwaysStoppedAnimation<Color>(Colors.deepPurple),
             ),
 
-          // WebView
+          // WebView or placeholder
           Expanded(
-            child: WebViewWidget(controller: _controller),
+            child: _hasLoadedUrl && _controller != null
+                ? WebViewWidget(controller: _controller!)
+                : Container(
+                    color: Colors.black,
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.videocam,
+                            size: 64,
+                            color: Colors.deepPurple,
+                          ),
+                          SizedBox(height: 16),
+                          Text(
+                            'Enter server URL and tap Go',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
           ),
         ],
       ),
