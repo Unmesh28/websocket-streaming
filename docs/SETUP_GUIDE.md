@@ -776,29 +776,39 @@ cat > ~/stream-config.sh << 'EOF'
 
 # ============== CONFIGURATION ==============
 # Replace with your Ubuntu server's IP address
-export SIGNALING_SERVER="ws://YOUR_UBUNTU_SERVER_IP:8080"
+SIGNALING_URL="ws://YOUR_UBUNTU_SERVER_IP:8080"
 
-# Stream identifier
-export STREAM_ID="pi-camera-stream"
+# Stream identifier (must match what viewers use)
+STREAM_ID="pi-camera-stream"
 
-# Camera settings
-export CAMERA_WIDTH=1280
-export CAMERA_HEIGHT=720
-export CAMERA_FPS=30
+# Video device
+VIDEO_DEVICE="/dev/video0"
+
+# Audio device
+AUDIO_DEVICE="default"
+
+# Camera type: "csi" for Pi Camera Module, "usb" for USB webcam
+CAMERA_TYPE="csi"
 
 # ============================================
 
 cd ~/websocket-streaming/build
-./pi_webrtc_streamer \
-    --signaling-url "$SIGNALING_SERVER" \
-    --stream-id "$STREAM_ID" \
-    --width $CAMERA_WIDTH \
-    --height $CAMERA_HEIGHT \
-    --fps $CAMERA_FPS
+
+# Command format: ./webrtc_streamer <signaling_url> <stream_id> <video_device> <audio_device> <camera_type>
+./webrtc_streamer "$SIGNALING_URL" "$STREAM_ID" "$VIDEO_DEVICE" "$AUDIO_DEVICE" "$CAMERA_TYPE"
 EOF
 
 chmod +x ~/stream-config.sh
 ```
+
+**Streamer Arguments:**
+| Position | Default | Description |
+|----------|---------|-------------|
+| 1 | `ws://localhost:8080` | Signaling server WebSocket URL |
+| 2 | `pi-camera-stream` | Stream ID (viewers connect with this) |
+| 3 | `/dev/video0` | Video device path |
+| 4 | `default` | ALSA audio device |
+| 5 | `csi` | Camera type (`csi` or `usb`) |
 
 ### 2.4 Run the Streamer
 
@@ -819,10 +829,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-Environment="SIGNALING_SERVER=ws://YOUR_UBUNTU_SERVER_IP:8080"
-Environment="STREAM_ID=pi-camera-stream"
 WorkingDirectory=/home/pi/websocket-streaming/build
-ExecStart=/home/pi/websocket-streaming/build/pi_webrtc_streamer --signaling-url ${SIGNALING_SERVER} --stream-id ${STREAM_ID}
+# Arguments: <signaling_url> <stream_id> <video_device> <audio_device> <camera_type>
+ExecStart=/home/pi/websocket-streaming/build/webrtc_streamer ws://YOUR_UBUNTU_SERVER_IP:8080 pi-camera-stream /dev/video0 default csi
 Restart=always
 RestartSec=10
 
