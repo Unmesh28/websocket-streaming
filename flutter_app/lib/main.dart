@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'services/webrtc_service.dart';
-import 'screens/stream_viewer_screen.dart';
+import 'screens/web_viewer_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,20 +11,17 @@ class PiCameraApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => WebRTCService(),
-      child: MaterialApp(
-        title: 'Pi Camera Viewer',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.blue,
-            brightness: Brightness.dark,
-          ),
-          useMaterial3: true,
+    return MaterialApp(
+      title: 'Pi Camera Viewer',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+          brightness: Brightness.dark,
         ),
-        home: const StreamViewerScreen(),
+        useMaterial3: true,
       ),
+      home: const WebViewerScreen(initialUrl: 'https://'),
     );
   }
 }
