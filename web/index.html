@@ -84,13 +84,13 @@
             z-index: 100;
         }
         .btn-ptt {
-            width: 80px;
-            height: 80px;
+            width: 100px;
+            height: 100px;
             border-radius: 50%;
             background: linear-gradient(145deg, #3b82f6, #1d4ed8);
             border: 4px solid rgba(255,255,255,0.3);
             color: white;
-            font-size: 12px;
+            font-size: 14px;
             font-weight: bold;
             cursor: pointer;
             transition: all 0.15s;
@@ -102,15 +102,23 @@
             user-select: none;
             -webkit-user-select: none;
             touch-action: none;
+            -webkit-touch-callout: none;
         }
         .btn-ptt:active, .btn-ptt.active {
             background: linear-gradient(145deg, #ef4444, #dc2626);
             transform: scale(0.95);
             box-shadow: 0 2px 10px rgba(239,68,68,0.6);
         }
-        .btn-ptt .icon { font-size: 28px; margin-bottom: 2px; }
-        .btn-ptt.disabled { opacity: 0.5; pointer-events: none; }
-        .btn-ptt.no-mic { background: linear-gradient(145deg, #6b7280, #4b5563); }
+        .btn-ptt .icon { font-size: 32px; margin-bottom: 4px; }
+        .btn-ptt.disabled {
+            opacity: 0.4;
+            pointer-events: none;
+            background: linear-gradient(145deg, #6b7280, #4b5563);
+        }
+        .btn-ptt.no-mic {
+            background: linear-gradient(145deg, #6b7280, #4b5563);
+            pointer-events: auto;
+        }
 
         .status-bar {
             padding: 8px 15px;
@@ -269,39 +277,83 @@
             overlay.classList.add('hidden');
         }
 
+        // Check if getUserMedia is supported
+        function isMicSupported() {
+            return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        }
+
         // Request microphone permission
         async function requestMicPermission() {
+            if (!isMicSupported()) {
+                console.error('getUserMedia not supported in this browser/WebView');
+                micPermissionGranted = false;
+                pttBtn.classList.add('no-mic');
+                micState.textContent = 'Not supported';
+                return false;
+            }
+
             try {
                 console.log('Requesting microphone permission...');
-                localStream = await navigator.mediaDevices.getUserMedia({
+
+                // For WebView compatibility, use simpler constraints first
+                const constraints = {
                     audio: {
                         echoCancellation: true,
                         noiseSuppression: true,
-                        autoGainControl: true
+                        autoGainControl: true,
+                        sampleRate: 48000
                     }
-                });
+                };
+
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
 
                 audioTrack = localStream.getAudioTracks()[0];
-                audioTrack.enabled = false; // Start muted
-
-                micPermissionGranted = true;
-                pttBtn.classList.remove('no-mic', 'disabled');
-                micState.textContent = 'Ready';
-                console.log('Microphone permission granted');
-                return true;
+                if (audioTrack) {
+                    audioTrack.enabled = false; // Start muted
+                    micPermissionGranted = true;
+                    pttBtn.classList.remove('no-mic', 'disabled');
+                    micState.textContent = 'Ready';
+                    console.log('Microphone permission granted, track:', audioTrack.label);
+                    return true;
+                } else {
+                    throw new Error('No audio track available');
+                }
             } catch (e) {
-                console.error('Microphone permission denied:', e);
+                console.error('Microphone permission denied:', e.name, e.message);
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
-                micState.textContent = 'Denied';
+                micState.textContent = e.name === 'NotAllowedError' ? 'Denied' : 'Error';
                 return false;
             }
         }
 
         // Push-to-talk handlers
-        function startTalk(event) {
+        async function startTalk(event) {
             if (event) event.preventDefault();
-            if (!pc || pc.connectionState !== 'connected' || !audioTrack) return;
+
+            // If mic not granted, try to request it (needs user gesture)
+            if (!micPermissionGranted) {
+                console.log('PTT: Requesting mic permission on user gesture...');
+                const granted = await requestMicPermission();
+                if (!granted) {
+                    console.log('PTT: Mic permission not granted');
+                    return;
+                }
+                // Re-add track to peer connection if connected
+                if (pc && audioTrack) {
+                    try {
+                        pc.addTrack(audioTrack, localStream);
+                        console.log('PTT: Added audio track to existing connection');
+                    } catch (e) {
+                        console.log('PTT: Track may already be added:', e.message);
+                    }
+                }
+            }
+
+            if (!pc || pc.connectionState !== 'connected' || !audioTrack) {
+                console.log('PTT: Not ready -', !pc ? 'no connection' : !audioTrack ? 'no audio track' : 'state: ' + pc.connectionState);
+                return;
+            }
 
             isTalking = true;
             audioTrack.enabled = true;
@@ -319,7 +371,9 @@
             audioTrack.enabled = false;
             pttBtn.classList.remove('active');
             micStatus.classList.remove('active');
-            micState.textContent = 'Ready';
+            if (micPermissionGranted) {
+                micState.textContent = 'Ready';
+            }
             console.log('PTT: Stopped talking');
         }
 
@@ -612,10 +666,17 @@
             }
         });
 
-        // Prevent zoom on double-tap
+        // Prevent zoom on double-tap (but allow buttons to work)
+        let lastTouchEnd = 0;
         document.addEventListener('touchend', (e) => {
-            if (e.target.closest('.btn-ptt')) return;
-            e.preventDefault();
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                // Double tap detected - prevent zoom only on video area
+                if (e.target.closest('.video-container') && !e.target.closest('button')) {
+                    e.preventDefault();
+                }
+            }
+            lastTouchEnd = now;
         }, { passive: false });
 
         // Ensure video plays when ready
