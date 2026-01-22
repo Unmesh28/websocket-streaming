@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class WebViewerScreen extends StatefulWidget {
   final String initialUrl;
@@ -13,17 +15,22 @@ class WebViewerScreen extends StatefulWidget {
   State<WebViewerScreen> createState() => _WebViewerScreenState();
 }
 
-class _WebViewerScreenState extends State<WebViewerScreen> {
+class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingObserver {
   WebViewController? _controller;
   final TextEditingController _urlController = TextEditingController();
   bool _isLoading = false;
   int _loadingProgress = 0;
   bool _hasLoadedUrl = false;
+  bool _micPermissionGranted = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _urlController.text = widget.initialUrl;
+
+    // Request microphone permission early
+    _requestMicPermission();
 
     // Only auto-load if we have a real URL
     if (widget.initialUrl.isNotEmpty &&
@@ -33,8 +40,32 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
     }
   }
 
+  Future<void> _requestMicPermission() async {
+    final status = await Permission.microphone.request();
+    setState(() {
+      _micPermissionGranted = status.isGranted;
+    });
+    if (status.isGranted) {
+      debugPrint('[WebView] Microphone permission granted');
+    } else {
+      debugPrint('[WebView] Microphone permission denied');
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Handle app lifecycle - refresh when coming back to foreground
+    if (state == AppLifecycleState.resumed && _hasLoadedUrl && _controller != null) {
+      // Inject JavaScript to check and reconnect if needed
+      _controller!.runJavaScript('if(typeof checkAndReconnect === "function") checkAndReconnect();');
+    }
+  }
+
   void _initWebView(String url) {
-    _controller = WebViewController()
+    final controller = WebViewController();
+
+    // Configure the controller
+    controller
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
       ..setNavigationDelegate(
@@ -54,14 +85,61 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
               _isLoading = false;
               _hasLoadedUrl = true;
             });
+            // Enable hardware acceleration for video
+            _controller?.runJavaScript('''
+              document.querySelectorAll('video').forEach(v => {
+                v.setAttribute('playsinline', '');
+                v.setAttribute('webkit-playsinline', '');
+              });
+            ''');
           },
           onWebResourceError: (WebResourceError error) {
             debugPrint('[WebView] Error: ${error.description}');
+            // Auto-retry on network errors
+            if (error.errorType == WebResourceErrorType.connect ||
+                error.errorType == WebResourceErrorType.timeout ||
+                error.errorType == WebResourceErrorType.hostLookup) {
+              Future.delayed(const Duration(seconds: 3), () {
+                if (mounted) _controller?.reload();
+              });
+            }
           },
         ),
       )
       ..loadRequest(Uri.parse(url));
 
+    // Enable hardware acceleration and microphone on Android
+    if (controller.platform is AndroidWebViewController) {
+      final androidController = controller.platform as AndroidWebViewController;
+      androidController.setMediaPlaybackRequiresUserGesture(false);
+
+      // Handle permission requests from JavaScript (microphone, camera)
+      androidController.setOnPlatformPermissionRequest((request) async {
+        debugPrint('[WebView] Permission request: ${request.types}');
+
+        // Check if microphone permission is requested
+        if (request.types.contains(WebViewPermissionResourceType.microphone)) {
+          if (_micPermissionGranted) {
+            debugPrint('[WebView] Granting microphone permission to WebView');
+            request.grant();
+          } else {
+            // Try to request permission again
+            final status = await Permission.microphone.request();
+            if (status.isGranted) {
+              setState(() => _micPermissionGranted = true);
+              request.grant();
+            } else {
+              request.deny();
+            }
+          }
+        } else {
+          // Grant other permissions (like camera if needed)
+          request.grant();
+        }
+      });
+    }
+
+    _controller = controller;
     setState(() {
       _hasLoadedUrl = true;
     });
@@ -71,9 +149,14 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
     String url = _urlController.text.trim();
     if (url.isEmpty) return;
 
-    // Ensure URL has protocol
+    // Ensure URL has protocol - default to http for IP addresses
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://$url';
+      // Use http for IP addresses (no SSL), https for domains
+      if (RegExp(r'^\d+\.\d+\.\d+\.\d+').hasMatch(url)) {
+        url = 'http://$url';
+      } else {
+        url = 'https://$url';
+      }
       _urlController.text = url;
     }
 
@@ -92,8 +175,15 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
     _controller?.reload();
   }
 
+  void _hardRefresh() {
+    // Clear cache and reload
+    _controller?.clearCache();
+    _controller?.reload();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _urlController.dispose();
     super.dispose();
   }
@@ -105,14 +195,30 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
         title: const Text('Live Stream'),
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
-        automaticallyImplyLeading: false, // No back button on home screen
+        automaticallyImplyLeading: false,
         actions: [
+          // Microphone status indicator
           if (_hasLoadedUrl)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Icon(
+                _micPermissionGranted ? Icons.mic : Icons.mic_off,
+                color: _micPermissionGranted ? Colors.green : Colors.red,
+                size: 20,
+              ),
+            ),
+          if (_hasLoadedUrl) ...[
             IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: _refresh,
               tooltip: 'Refresh',
             ),
+            IconButton(
+              icon: const Icon(Icons.cleaning_services),
+              onPressed: _hardRefresh,
+              tooltip: 'Hard Refresh (Clear Cache)',
+            ),
+          ],
         ],
       ),
       body: Column(
@@ -127,7 +233,7 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
                   child: TextField(
                     controller: _urlController,
                     decoration: InputDecoration(
-                      hintText: 'Enter server URL (e.g., https://xxx.trycloudflare.com)',
+                      hintText: 'Enter server URL (e.g., http://1.2.3.4:8080)',
                       filled: true,
                       fillColor: Colors.grey[800],
                       contentPadding: const EdgeInsets.symmetric(
@@ -193,6 +299,22 @@ class _WebViewerScreenState extends State<WebViewerScreen> {
                             style: TextStyle(
                               color: Colors.white70,
                               fontSize: 16,
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            'Example: http://3.110.83.74:8080',
+                            style: TextStyle(
+                              color: Colors.white38,
+                              fontSize: 14,
+                            ),
+                          ),
+                          SizedBox(height: 16),
+                          Text(
+                            'Push-to-talk enabled',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: 12,
                             ),
                           ),
                         ],

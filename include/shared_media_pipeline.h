@@ -125,6 +125,12 @@ private:
     GstPad* webrtc_video_sink_;     // Sink pad on webrtcbin for video
     GstPad* webrtc_audio_sink_;     // Sink pad on webrtcbin for audio
 
+    // Audio playback for receiving viewer's audio (push-to-talk)
+    GstElement* audio_decodebin_;   // Decodes incoming audio
+    GstElement* audio_convert_;     // Audio format conversion
+    GstElement* audio_resample_;    // Audio resampling
+    GstElement* audio_sink_;        // Audio output (alsasink)
+
     // Probe IDs for cleanup
     gulong video_tee_probe_id_;
     gulong video_queue_sink_probe_id_;
@@ -177,6 +183,13 @@ private:
     static void onIceConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
     static void onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
     static void onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
+
+    // Callback for incoming media pads (viewer's audio)
+    static void onPadAdded(GstElement* webrtc, GstPad* pad, gpointer user_data);
+    static void onDecodebinPadAdded(GstElement* decodebin, GstPad* pad, gpointer user_data);
+
+    // Setup audio playback pipeline for receiving viewer's audio
+    void setupAudioPlayback();
 };
 
 #endif // SHARED_MEDIA_PIPELINE_H

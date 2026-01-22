@@ -2,753 +2,590 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raspberry Pi WebRTC Stream Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pi Camera Live Stream</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
             min-height: 100vh;
-            padding: 20px;
             color: white;
+            overflow: hidden;
         }
-
         .container {
-            max-width: 1400px;
-            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
         }
-
-        h1 {
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 2.5em;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        .header {
+            padding: 10px 15px;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
         }
-
-        .subtitle {
-            text-align: center;
-            margin-bottom: 30px;
-            opacity: 0.9;
-            font-size: 1.1em;
-        }
-
+        .header h1 { font-size: 1.2em; flex-shrink: 0; }
         .video-container {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 15px;
-            padding: 20px;
-            margin-bottom: 20px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+            overflow: hidden;
         }
-
         video {
             width: 100%;
-            max-width: 1280px;
-            min-height: 400px;
-            border-radius: 10px;
-            background: #000;
-            display: block;
-            margin: 0 auto;
+            height: 100%;
             object-fit: contain;
+            background: #000;
         }
-
         .controls {
             display: flex;
-            gap: 10px;
-            justify-content: center;
+            gap: 8px;
+            align-items: center;
             flex-wrap: wrap;
-            margin-top: 20px;
+            flex: 1;
         }
-
         input {
-            padding: 12px 20px;
-            font-size: 16px;
-            border: 2px solid rgba(255,255,255,0.3);
-            border-radius: 8px;
-            background: rgba(255,255,255,0.1);
+            padding: 8px 12px;
+            font-size: 14px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.15);
             color: white;
-            min-width: 300px;
+            width: 150px;
         }
-
-        input::placeholder {
-            color: rgba(255,255,255,0.6);
-        }
-
+        input::placeholder { color: rgba(255,255,255,0.5); }
         button {
-            padding: 12px 30px;
-            font-size: 16px;
+            padding: 8px 16px;
+            font-size: 14px;
             font-weight: 600;
             border: none;
-            border-radius: 8px;
+            border-radius: 6px;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        .btn-connect { background: #4ade80; color: #000; }
+        .btn-disconnect { background: #f87171; color: #fff; }
+        .btn-refresh { background: #60a5fa; color: #fff; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button:hover:not(:disabled) { transform: scale(1.05); }
+
+        /* Push-to-talk button */
+        .ptt-container {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+        }
+        .btn-ptt {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+            border: 4px solid rgba(255,255,255,0.3);
             color: white;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
         }
-
-        .btn-connect {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        .btn-ptt:active, .btn-ptt.active {
+            background: linear-gradient(145deg, #ef4444, #dc2626);
+            transform: scale(0.95);
+            box-shadow: 0 2px 10px rgba(239,68,68,0.6);
         }
+        .btn-ptt .icon { font-size: 28px; margin-bottom: 2px; }
+        .btn-ptt.disabled { opacity: 0.5; pointer-events: none; }
+        .btn-ptt.no-mic { background: linear-gradient(145deg, #6b7280, #4b5563); }
 
-        .btn-disconnect {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        }
-
-        .btn-refresh {
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        }
-
-        button:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-        }
-
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .status-panel {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-
-        .status-item {
+        .status-bar {
+            padding: 8px 15px;
+            background: rgba(0,0,0,0.7);
             display: flex;
             justify-content: space-between;
-            padding: 10px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            align-items: center;
+            font-size: 12px;
+            flex-wrap: wrap;
+            gap: 10px;
         }
-
-        .status-item:last-child {
-            border-bottom: none;
+        .status { display: flex; gap: 15px; flex-wrap: wrap; }
+        .status span { display: flex; align-items: center; gap: 5px; }
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
         }
+        .dot-green { background: #4ade80; }
+        .dot-red { background: #f87171; }
+        .dot-yellow { background: #fbbf24; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-        .status-label {
-            font-weight: 600;
+        .overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0,0,0,0.8);
+            padding: 20px 30px;
+            border-radius: 10px;
         }
-
-        .status-value {
-            font-family: 'Courier New', monospace;
+        .overlay.hidden { display: none; }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #4ade80;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .fullscreen-btn { background: rgba(255,255,255,0.2); color: white; padding: 6px 10px; }
 
-        .status-connected {
-            color: #4ade80;
-        }
-
-        .status-disconnected {
-            color: #f87171;
-        }
-
-        .status-connecting {
-            color: #fbbf24;
-        }
-
-        .info-box {
-            background: rgba(59, 130, 246, 0.2);
-            border-left: 4px solid #3b82f6;
-            padding: 15px;
+        .mic-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 10px;
             border-radius: 5px;
-            margin-top: 20px;
-        }
-
-        .error-box {
-            background: rgba(239, 68, 68, 0.2);
-            border-left: 4px solid #ef4444;
-            padding: 15px;
-            border-radius: 5px;
-            margin-top: 20px;
+            font-size: 12px;
             display: none;
         }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .pulsing {
-            animation: pulse 2s ease-in-out infinite;
-        }
-
-        @media (max-width: 768px) {
-            h1 {
-                font-size: 1.8em;
-            }
-            
-            button, input {
-                padding: 10px 20px;
-                font-size: 14px;
-                min-width: 100%;
-            }
-        }
+        .mic-status.active { display: block; background: rgba(239,68,68,0.8); }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎥 Raspberry Pi Live Stream</h1>
-        <div class="subtitle">WebRTC Real-Time Monitoring</div>
+        <div class="header">
+            <h1>🎥 Live Stream</h1>
+            <div class="controls">
+                <input type="text" id="streamId" placeholder="Stream ID" value="pi-camera-stream">
+                <button class="btn-connect" id="connectBtn" onclick="connect()">Connect</button>
+                <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+                <button class="btn-refresh" id="refreshBtn" onclick="refresh()" disabled>Refresh</button>
+                <button class="fullscreen-btn" onclick="toggleFullscreen()">⛶</button>
+            </div>
+        </div>
 
         <div class="video-container">
-            <video id="video" autoplay playsinline controls muted></video>
-            
-            <div class="controls">
-                <input type="text" id="streamId" placeholder="Stream ID (e.g., pi-camera-stream)" value="pi-camera-stream">
-                <input type="text" id="serverUrl" placeholder="Signaling Server URL" value="ws://localhost:8080">
-                <button class="btn-connect" id="connectBtn" onclick="connectToStream()">▶️ Connect</button>
-                <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>⏹️ Disconnect</button>
-                <button class="btn-refresh" id="refreshBtn" onclick="refresh()" disabled>🔄 Refresh</button>
+            <video id="video" autoplay playsinline muted></video>
+
+            <div id="overlay" class="overlay hidden">
+                <div class="spinner"></div>
+                <div id="overlayText">Connecting...</div>
+            </div>
+
+            <div id="micStatus" class="mic-status">🎤 Transmitting...</div>
+
+            <div class="ptt-container">
+                <button id="pttBtn" class="btn-ptt disabled no-mic"
+                        onmousedown="startTalk()" onmouseup="stopTalk()" onmouseleave="stopTalk()"
+                        ontouchstart="startTalk(event)" ontouchend="stopTalk(event)" ontouchcancel="stopTalk(event)">
+                    <span class="icon">🎤</span>
+                    <span>TALK</span>
+                </button>
             </div>
         </div>
 
-        <script>
-        // Auto-detect WebSocket URL from current page location (for ngrok)
-        (function() {
-            const serverUrlInput = document.getElementById('serverUrl');
-            if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                serverUrlInput.value = protocol + '//' + window.location.host;
-            }
-        })();
-        </script>
-
-        <div class="status-panel">
-            <div class="status-item">
-                <span class="status-label">Status:</span>
-                <span id="status" class="status-value status-disconnected">Disconnected</span>
+        <div class="status-bar">
+            <div class="status">
+                <span><span id="statusDot" class="dot dot-red"></span> <span id="statusText">Disconnected</span></span>
+                <span>ICE: <span id="iceState">-</span></span>
+                <span>Mic: <span id="micState">Off</span></span>
             </div>
-            <div class="status-item">
-                <span class="status-label">Stream ID:</span>
-                <span id="currentStream" class="status-value">-</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">Connection:</span>
-                <span id="connectionState" class="status-value">-</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">ICE State:</span>
-                <span id="iceState" class="status-value">-</span>
-            </div>
+            <div id="reconnectInfo"></div>
         </div>
-
-        <div class="info-box">
-            <strong>ℹ️ Instructions:</strong>
-            <ul style="margin-left: 20px; margin-top: 10px;">
-                <li>Make sure signaling server is running</li>
-                <li>Make sure Raspberry Pi C++ app is running</li>
-                <li>Enter the stream ID (default: pi-camera-stream)</li>
-                <li>Enter signaling server URL (use ngrok URL if remote)</li>
-                <li>Click "Connect" to start viewing</li>
-            </ul>
-        </div>
-
-        <div id="errorBox" class="error-box"></div>
     </div>
 
     <script>
-        // ==================== DEBUG LOGGING ====================
-        const DEBUG = true;
-        function log(category, message, data = null) {
-            if (!DEBUG) return;
-            const timestamp = new Date().toISOString().substr(11, 12);
-            const prefix = `[${timestamp}] [${category}]`;
-            if (data) {
-                console.log(prefix, message, data);
-            } else {
-                console.log(prefix, message);
-            }
-        }
-
-        function logVideoState() {
-            const v = document.getElementById('video');
-            log('VIDEO-STATE', `Dimensions: ${v.videoWidth}x${v.videoHeight}, ` +
-                `readyState: ${v.readyState}, paused: ${v.paused}, ` +
-                `currentTime: ${v.currentTime.toFixed(2)}, ` +
-                `networkState: ${v.networkState}, ended: ${v.ended}`);
-            if (v.srcObject) {
-                const tracks = v.srcObject.getTracks();
-                log('VIDEO-STATE', `srcObject tracks: ${tracks.length}`);
-                tracks.forEach((t, i) => {
-                    log('VIDEO-STATE', `  Track ${i}: kind=${t.kind}, enabled=${t.enabled}, ` +
-                        `muted=${t.muted}, readyState=${t.readyState}, id=${t.id}`);
-                    if (t.getSettings) {
-                        const settings = t.getSettings();
-                        log('VIDEO-STATE', `  Settings:`, settings);
-                    }
-                });
-            } else {
-                log('VIDEO-STATE', 'srcObject is NULL');
-            }
-        }
-
-        // Log video state every 3 seconds when connected
-        setInterval(() => {
-            if (pc && pc.connectionState === 'connected') {
-                logVideoState();
-            }
-        }, 3000);
-        // ==================== END DEBUG LOGGING ====================
+        // ============== CONFIG ==============
+        const AUTO_RECONNECT = true;
+        const RECONNECT_DELAY = 3000;
+        const MAX_RECONNECT_ATTEMPTS = 100;
+        const CONNECTION_TIMEOUT = 20000;
+        // ====================================
 
         let ws = null;
         let pc = null;
-        let viewerId = null;
-        let iceServers = null; // Will be fetched from server
-        let isConnecting = false; // Connection guard
-        let isDisconnecting = false; // Disconnect guard
-        let connectionTimeout = null; // Connection timeout timer
+        let iceServers = null;
+        let isConnecting = false;
+        let reconnectAttempts = 0;
+        let reconnectTimer = null;
+        let connectionTimer = null;
+        let lastStreamId = '';
+
+        // Audio/microphone
+        let localStream = null;
+        let audioTrack = null;
+        let isTalking = false;
+        let micPermissionGranted = false;
 
         const video = document.getElementById('video');
-        const statusEl = document.getElementById('status');
-        const currentStreamEl = document.getElementById('currentStream');
-        const connectionStateEl = document.getElementById('connectionState');
-        const iceStateEl = document.getElementById('iceState');
-        const errorBox = document.getElementById('errorBox');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const iceState = document.getElementById('iceState');
+        const micState = document.getElementById('micState');
+        const overlay = document.getElementById('overlay');
+        const overlayText = document.getElementById('overlayText');
+        const reconnectInfo = document.getElementById('reconnectInfo');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
         const refreshBtn = document.getElementById('refreshBtn');
+        const pttBtn = document.getElementById('pttBtn');
+        const micStatus = document.getElementById('micStatus');
 
-        // Add video element event listeners for debugging
-        video.addEventListener('loadstart', () => log('VIDEO-EVENT', 'loadstart'));
-        video.addEventListener('loadedmetadata', () => {
-            log('VIDEO-EVENT', `loadedmetadata - dimensions: ${video.videoWidth}x${video.videoHeight}`);
-        });
-        video.addEventListener('loadeddata', () => log('VIDEO-EVENT', 'loadeddata'));
-        video.addEventListener('canplay', () => log('VIDEO-EVENT', 'canplay'));
-        video.addEventListener('canplaythrough', () => log('VIDEO-EVENT', 'canplaythrough'));
-        video.addEventListener('play', () => log('VIDEO-EVENT', 'play'));
-        video.addEventListener('playing', () => log('VIDEO-EVENT', 'playing'));
-        video.addEventListener('pause', () => log('VIDEO-EVENT', 'pause'));
-        video.addEventListener('waiting', () => log('VIDEO-EVENT', 'waiting'));
-        video.addEventListener('stalled', () => log('VIDEO-EVENT', 'stalled'));
-        video.addEventListener('suspend', () => log('VIDEO-EVENT', 'suspend'));
-        video.addEventListener('error', (e) => log('VIDEO-EVENT', 'ERROR', video.error));
-        video.addEventListener('emptied', () => log('VIDEO-EVENT', 'emptied'));
-        video.addEventListener('ended', () => log('VIDEO-EVENT', 'ended'));
-        video.addEventListener('resize', () => {
-            log('VIDEO-EVENT', `resize - new dimensions: ${video.videoWidth}x${video.videoHeight}`);
-        });
-
-        function updateStatus(status) {
-            log('STATUS', `Status changed to: ${status}`);
-            statusEl.textContent = status;
-            statusEl.className = 'status-value';
-
-            if (status === 'Connected') {
-                statusEl.classList.add('status-connected');
-            } else if (status === 'Disconnected') {
-                statusEl.classList.add('status-disconnected');
-            } else {
-                statusEl.classList.add('status-connecting');
-            }
+        function setStatus(status, dot) {
+            statusText.textContent = status;
+            statusDot.className = 'dot dot-' + dot;
         }
 
-        function showError(message) {
-            log('ERROR', message);
-            errorBox.textContent = '❌ Error: ' + message;
-            errorBox.style.display = 'block';
-            setTimeout(() => {
-                errorBox.style.display = 'none';
-            }, 5000);
+        function showOverlay(text) {
+            overlayText.textContent = text;
+            overlay.classList.remove('hidden');
         }
 
-        async function connectToStream() {
-            // Connection guard - prevent multiple simultaneous connection attempts
-            if (isConnecting) {
-                log('CONNECT', 'Already connecting, ignoring request');
-                return;
-            }
-            if (isDisconnecting) {
-                log('CONNECT', 'Currently disconnecting, please wait');
-                return;
-            }
+        function hideOverlay() {
+            overlay.classList.add('hidden');
+        }
 
+        // Request microphone permission
+        async function requestMicPermission() {
             try {
-                isConnecting = true;
-                const streamId = document.getElementById('streamId').value.trim();
-                const serverUrl = document.getElementById('serverUrl').value.trim();
-
-                log('CONNECT', `Connecting to ${serverUrl} for stream ${streamId}`);
-
-                if (!streamId || !serverUrl) {
-                    showError('Please enter stream ID and server URL');
-                    isConnecting = false;
-                    return;
-                }
-
-                // Clean up any existing connection first
-                await cleanupConnection();
-
-                updateStatus('Connecting...');
-                errorBox.style.display = 'none';
-                connectBtn.disabled = true;
-                disconnectBtn.disabled = true;
-                refreshBtn.disabled = true;
-
-                // Fetch TURN credentials from server first
-                log('TURN', 'Fetching TURN credentials...');
-                try {
-                    const httpUrl = serverUrl.replace('wss://', 'https://').replace('ws://', 'http://');
-                    const turnResponse = await fetch(`${httpUrl}/turn-credentials`);
-                    if (turnResponse.ok) {
-                        const turnData = await turnResponse.json();
-                        iceServers = turnData.iceServers;
-                        log('TURN', `Got ${iceServers.length} ICE servers including TURN`);
-                    } else {
-                        log('TURN', 'Could not fetch TURN credentials, using STUN only');
-                        iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+                console.log('Requesting microphone permission...');
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
                     }
-                } catch (e) {
-                    log('TURN', `TURN fetch error: ${e.message}, using STUN only`);
-                    iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-                }
+                });
 
-                // Connect to signaling server
-                ws = new WebSocket(serverUrl);
+                audioTrack = localStream.getAudioTracks()[0];
+                audioTrack.enabled = false; // Start muted
 
-                // Set connection timeout (15 seconds)
-                connectionTimeout = setTimeout(() => {
-                    if (isConnecting) {
-                        log('TIMEOUT', 'Connection timeout - no video after 15 seconds');
-                        showError('Connection timeout - please try again');
-                        isConnecting = false;
-                        disconnect();
-                    }
-                }, 15000);
-
-                ws.onopen = () => {
-                    log('WEBSOCKET', 'Connected to signaling server');
-
-                    // Join stream
-                    const joinMsg = { type: 'join', stream_id: streamId };
-                    log('WEBSOCKET', 'Sending join message', joinMsg);
-                    ws.send(JSON.stringify(joinMsg));
-                };
-
-                ws.onmessage = async (event) => {
-                    const data = JSON.parse(event.data);
-                    log('WEBSOCKET', `Received message type: ${data.type}`, data);
-
-                    switch(data.type) {
-                        case 'joined':
-                            viewerId = data.viewer_id;
-                            currentStreamEl.textContent = data.stream_id;
-                            log('WEBSOCKET', `Joined as viewer: ${viewerId}`);
-                            break;
-
-                        case 'offer':
-                            log('WEBRTC', 'Received SDP offer, length:', data.sdp.length);
-                            await handleOffer(data.sdp);
-                            break;
-
-                        case 'ice-candidate':
-                            log('WEBRTC', `Received ICE candidate: ${data.candidate.substring(0, 50)}...`);
-                            await handleIceCandidate(data.candidate, data.sdpMLineIndex);
-                            break;
-
-                        case 'broadcaster-left':
-                            log('WEBSOCKET', 'Broadcaster disconnected');
-                            showError('Broadcaster disconnected');
-                            disconnect();
-                            break;
-
-                        case 'error':
-                            log('WEBSOCKET', 'Error from server', data.message);
-                            showError(data.message);
-                            disconnect();
-                            break;
-                    }
-                };
-
-                ws.onerror = (error) => {
-                    log('WEBSOCKET', 'Error', error);
-                    showError('WebSocket connection failed');
-                    isConnecting = false;
-                    disconnect();
-                };
-
-                ws.onclose = (event) => {
-                    log('WEBSOCKET', `Closed - code: ${event.code}, reason: ${event.reason}`);
-                    isConnecting = false;
-                    if (statusEl.textContent !== 'Disconnected') {
-                        updateStatus('Disconnected');
-                        connectBtn.disabled = false;
-                        disconnectBtn.disabled = true;
-                        refreshBtn.disabled = true;
-                    }
-                };
-
-            } catch (error) {
-                log('ERROR', 'Connection error', error);
-                showError(error.message);
-                isConnecting = false;
-                disconnect();
+                micPermissionGranted = true;
+                pttBtn.classList.remove('no-mic', 'disabled');
+                micState.textContent = 'Ready';
+                console.log('Microphone permission granted');
+                return true;
+            } catch (e) {
+                console.error('Microphone permission denied:', e);
+                micPermissionGranted = false;
+                pttBtn.classList.add('no-mic');
+                micState.textContent = 'Denied';
+                return false;
             }
         }
 
-        async function handleOffer(sdp) {
-            log('WEBRTC', 'Creating RTCPeerConnection');
+        // Push-to-talk handlers
+        function startTalk(event) {
+            if (event) event.preventDefault();
+            if (!pc || pc.connectionState !== 'connected' || !audioTrack) return;
 
-            // Use fetched ICE servers (includes TURN for NAT traversal)
-            const config = { iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }] };
-            log('WEBRTC', `Using ${config.iceServers.length} ICE servers`);
+            isTalking = true;
+            audioTrack.enabled = true;
+            pttBtn.classList.add('active');
+            micStatus.classList.add('active');
+            micState.textContent = 'Talking';
+            console.log('PTT: Started talking');
+        }
 
-            // Create peer connection
-            pc = new RTCPeerConnection(config);
+        function stopTalk(event) {
+            if (event) event.preventDefault();
+            if (!audioTrack) return;
 
-            // Handle incoming stream
-            pc.ontrack = (event) => {
-                log('WEBRTC', `ontrack event - kind: ${event.track.kind}, ` +
-                    `streams: ${event.streams.length}, track.id: ${event.track.id}`);
+            isTalking = false;
+            audioTrack.enabled = false;
+            pttBtn.classList.remove('active');
+            micStatus.classList.remove('active');
+            micState.textContent = 'Ready';
+            console.log('PTT: Stopped talking');
+        }
 
-                if (event.streams[0]) {
-                    log('WEBRTC', `Stream ID: ${event.streams[0].id}, ` +
-                        `tracks in stream: ${event.streams[0].getTracks().length}`);
+        async function connect() {
+            if (isConnecting) return;
+
+            const streamId = document.getElementById('streamId').value.trim();
+            if (!streamId) { alert('Enter stream ID'); return; }
+
+            lastStreamId = streamId;
+            isConnecting = true;
+            reconnectInfo.textContent = '';
+
+            await cleanup();
+
+            // Request mic permission if not already granted
+            if (!micPermissionGranted) {
+                await requestMicPermission();
+            }
+
+            setStatus('Connecting...', 'yellow');
+            showOverlay('Connecting...');
+            connectBtn.disabled = true;
+            disconnectBtn.disabled = true;
+            refreshBtn.disabled = true;
+            pttBtn.classList.add('disabled');
+
+            // Fetch TURN credentials
+            try {
+                const res = await fetch('/turn-credentials');
+                if (res.ok) {
+                    const data = await res.json();
+                    iceServers = data.iceServers;
                 }
+            } catch (e) {
+                iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+            }
 
-                // Only set video srcObject for video tracks (not audio)
-                if (event.track.kind === 'video' && event.streams && event.streams[0]) {
-                    log('WEBRTC', 'Setting video.srcObject with video stream');
-                    video.srcObject = event.streams[0];
+            // Connect WebSocket
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}`);
 
-                    // Log track settings
-                    if (event.track.getSettings) {
-                        log('WEBRTC', 'Video track settings:', event.track.getSettings());
-                    }
+            connectionTimer = setTimeout(() => {
+                if (isConnecting) {
+                    console.log('Connection timeout');
+                    handleConnectionFailure('Connection timeout');
+                }
+            }, CONNECTION_TIMEOUT);
 
-                    // Force play (handle autoplay restrictions)
-                    log('VIDEO', 'Attempting to play video');
-                    video.play().then(() => {
-                        log('VIDEO', 'play() succeeded');
-                        logVideoState();
-                    }).catch(err => {
-                        log('VIDEO', 'play() failed, retrying muted', err.message);
-                        video.muted = true;
-                        video.play().then(() => {
-                            log('VIDEO', 'Muted play() succeeded');
-                        }).catch(err2 => {
-                            log('VIDEO', 'Muted play() also failed', err2.message);
-                        });
-                    });
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                ws.send(JSON.stringify({ type: 'join', stream_id: streamId }));
+            };
 
-                    updateStatus('Connected');
-                    isConnecting = false;
-                    if (connectionTimeout) {
-                        clearTimeout(connectionTimeout);
-                        connectionTimeout = null;
-                    }
-                    disconnectBtn.disabled = false;
-                    refreshBtn.disabled = false;
-                } else if (event.track.kind === 'audio') {
-                    log('WEBRTC', 'Audio track received');
-                    // If video already has srcObject, add audio track to it
-                    if (video.srcObject) {
-                        log('WEBRTC', 'Adding audio track to existing srcObject');
-                        try {
-                            video.srcObject.addTrack(event.track);
-                            log('WEBRTC', 'Audio track added successfully');
-                        } catch (e) {
-                            log('WEBRTC', 'Failed to add audio track', e.message);
+            ws.onmessage = async (e) => {
+                const data = JSON.parse(e.data);
+
+                switch(data.type) {
+                    case 'joined':
+                        showOverlay('Waiting for stream...');
+                        break;
+                    case 'offer':
+                        await handleOffer(data.sdp, data.from);
+                        break;
+                    case 'ice-candidate':
+                        if (pc && data.candidate) {
+                            try {
+                                await pc.addIceCandidate({
+                                    candidate: data.candidate,
+                                    sdpMLineIndex: data.sdpMLineIndex
+                                });
+                            } catch (e) {}
                         }
-                    } else {
-                        log('WEBRTC', 'No video srcObject yet, audio track not added');
-                    }
+                        break;
+                    case 'broadcaster-left':
+                        handleConnectionFailure('Stream ended');
+                        break;
+                    case 'error':
+                        handleConnectionFailure(data.message || 'Error');
+                        break;
                 }
             };
 
-            // Handle connection state
-            pc.onconnectionstatechange = () => {
-                log('WEBRTC', `Connection state: ${pc.connectionState}`);
-                connectionStateEl.textContent = pc.connectionState;
-                if (pc.connectionState === 'connected') {
-                    logVideoState();
+            ws.onerror = () => handleConnectionFailure('Connection error');
+            ws.onclose = () => {
+                if (isConnecting || statusText.textContent === 'Connected') {
+                    handleConnectionFailure('Connection lost');
+                }
+            };
+        }
+
+        async function handleOffer(sdp, streamId) {
+            pc = new RTCPeerConnection({
+                iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            // Add local audio track for push-to-talk (if mic permission granted)
+            if (audioTrack) {
+                console.log('Adding local audio track for PTT');
+                pc.addTrack(audioTrack, localStream);
+            }
+
+            pc.ontrack = (e) => {
+                console.log('Track received:', e.track.kind);
+                if (e.track.kind === 'video' && e.streams[0]) {
+                    video.srcObject = e.streams[0];
+                    video.play().catch(() => { video.muted = true; video.play(); });
+
+                    clearTimeout(connectionTimer);
+                    isConnecting = false;
+                    reconnectAttempts = 0;
+
+                    setStatus('Connected', 'green');
+                    hideOverlay();
+                    disconnectBtn.disabled = false;
+                    refreshBtn.disabled = false;
+
+                    // Enable PTT button if mic is available
+                    if (micPermissionGranted) {
+                        pttBtn.classList.remove('disabled');
+                    }
+
+                    reconnectInfo.textContent = '';
                 }
             };
 
             pc.oniceconnectionstatechange = () => {
-                log('WEBRTC', `ICE state: ${pc.iceConnectionState}`);
-                iceStateEl.textContent = pc.iceConnectionState;
-
-                if (pc.iceConnectionState === 'failed' ||
-                    pc.iceConnectionState === 'disconnected') {
-                    showError('Connection lost');
+                iceState.textContent = pc.iceConnectionState;
+                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                    handleConnectionFailure('ICE ' + pc.iceConnectionState);
                 }
             };
 
-            pc.onicegatheringstatechange = () => {
-                log('WEBRTC', `ICE gathering state: ${pc.iceGatheringState}`);
-            };
-
-            pc.onsignalingstatechange = () => {
-                log('WEBRTC', `Signaling state: ${pc.signalingState}`);
-            };
-
-            // Send ICE candidates
-            pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    log('WEBRTC', `Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`);
+            pc.onicecandidate = (e) => {
+                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({
                         type: 'ice-candidate',
-                        to: currentStreamEl.textContent,
-                        candidate: event.candidate.candidate,
-                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                        to: streamId,
+                        candidate: e.candidate.candidate,
+                        sdpMLineIndex: e.candidate.sdpMLineIndex
                     }));
-                } else {
-                    log('WEBRTC', 'ICE gathering complete');
                 }
             };
 
-            // Set remote description (offer)
-            log('WEBRTC', 'Setting remote description (offer)');
-            await pc.setRemoteDescription({
-                type: 'offer',
-                sdp: sdp
-            });
-            log('WEBRTC', 'Remote description set');
-
-            // Create answer
-            log('WEBRTC', 'Creating answer');
+            await pc.setRemoteDescription({ type: 'offer', sdp });
             const answer = await pc.createAnswer();
-            log('WEBRTC', 'Answer created, setting local description');
             await pc.setLocalDescription(answer);
-            log('WEBRTC', 'Local description set');
 
-            // Send answer
-            log('WEBRTC', 'Sending answer to broadcaster');
             ws.send(JSON.stringify({
                 type: 'answer',
-                to: currentStreamEl.textContent,
+                to: streamId,
                 sdp: answer.sdp
             }));
-            log('WEBRTC', 'Answer sent');
         }
 
-        async function handleIceCandidate(candidate, sdpMLineIndex) {
-            if (pc) {
-                log('WEBRTC', `Adding remote ICE candidate, mlineindex: ${sdpMLineIndex}`);
-                try {
-                    await pc.addIceCandidate({
-                        candidate: candidate,
-                        sdpMLineIndex: sdpMLineIndex
-                    });
-                    log('WEBRTC', 'ICE candidate added successfully');
-                } catch (e) {
-                    log('WEBRTC', 'Failed to add ICE candidate', e.message);
-                }
-            }
-        }
+        function handleConnectionFailure(reason) {
+            clearTimeout(connectionTimer);
+            isConnecting = false;
 
-        // Internal cleanup function - doesn't update UI state
-        async function cleanupConnection() {
-            log('CLEANUP', 'Cleaning up existing connection...');
+            setStatus('Disconnected', 'red');
+            showOverlay(reason);
+            iceState.textContent = '-';
+            pttBtn.classList.add('disabled');
+            stopTalk();
 
-            // Clear connection timeout
-            if (connectionTimeout) {
-                clearTimeout(connectionTimeout);
-                connectionTimeout = null;
-            }
-
-            if (pc) {
-                log('CLEANUP', 'Closing peer connection');
-                pc.ontrack = null;
-                pc.onicecandidate = null;
-                pc.onconnectionstatechange = null;
-                pc.oniceconnectionstatechange = null;
-                pc.onicegatheringstatechange = null;
-                pc.onsignalingstatechange = null;
-                pc.close();
-                pc = null;
-            }
-
-            if (ws) {
-                log('CLEANUP', 'Closing WebSocket');
-                ws.onopen = null;
-                ws.onmessage = null;
-                ws.onerror = null;
-                ws.onclose = null;
-                if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-                    ws.close();
-                }
-                ws = null;
-            }
-
-            if (video.srcObject) {
-                log('CLEANUP', 'Stopping video tracks');
-                const tracks = video.srcObject.getTracks();
-                tracks.forEach(track => track.stop());
-                video.srcObject = null;
-            }
-
-            viewerId = null;
-            log('CLEANUP', 'Cleanup complete');
-
-            // Small delay to ensure resources are released
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-
-        async function disconnect() {
-            if (isDisconnecting) {
-                log('DISCONNECT', 'Already disconnecting, ignoring');
-                return;
-            }
-
-            isDisconnecting = true;
-            log('DISCONNECT', 'Disconnecting...');
-
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = true;
-
-            await cleanupConnection();
-
-            updateStatus('Disconnected');
-            currentStreamEl.textContent = '-';
-            connectionStateEl.textContent = '-';
-            iceStateEl.textContent = '-';
+            cleanup(true); // Keep mic stream
 
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
             refreshBtn.disabled = true;
-            isDisconnecting = false;
-            isConnecting = false; // Reset in case it was stuck
-            log('DISCONNECT', 'Disconnected');
+
+            if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++;
+                const delay = Math.min(RECONNECT_DELAY * reconnectAttempts, 30000);
+                reconnectInfo.textContent = `Reconnecting in ${delay/1000}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+                showOverlay(`${reason} - Reconnecting...`);
+
+                reconnectTimer = setTimeout(() => {
+                    document.getElementById('streamId').value = lastStreamId;
+                    connect();
+                }, delay);
+            }
         }
 
-        // Refresh function - disconnect and reconnect smoothly
-        async function refresh() {
-            if (isConnecting || isDisconnecting) {
-                log('REFRESH', 'Operation in progress, ignoring refresh');
-                return;
+        async function cleanup(keepMic = false) {
+            clearTimeout(reconnectTimer);
+            clearTimeout(connectionTimer);
+
+            if (pc) {
+                pc.ontrack = null;
+                pc.onicecandidate = null;
+                pc.oniceconnectionstatechange = null;
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.onopen = null;
+                ws.onmessage = null;
+                ws.onerror = null;
+                ws.onclose = null;
+                if (ws.readyState === WebSocket.OPEN) ws.close();
+                ws = null;
+            }
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+                video.srcObject = null;
             }
 
-            log('REFRESH', 'Refreshing connection...');
-            refreshBtn.disabled = true;
-
-            // Save current settings
-            const streamId = document.getElementById('streamId').value.trim();
-            const serverUrl = document.getElementById('serverUrl').value.trim();
-
-            // Disconnect first
-            await disconnect();
-
-            // Small delay to ensure cleanup
-            await new Promise(resolve => setTimeout(resolve, 200));
-
-            // Reconnect
-            await connectToStream();
-            log('REFRESH', 'Refresh complete');
+            // Only cleanup mic if explicitly requested
+            if (!keepMic && localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+                audioTrack = null;
+                micPermissionGranted = false;
+                pttBtn.classList.add('no-mic', 'disabled');
+                micState.textContent = 'Off';
+            }
         }
 
-        // Auto-cleanup on page unload
-        window.addEventListener('beforeunload', disconnect);
+        async function disconnect() {
+            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+            lastStreamId = '';
+            await cleanup(false); // Full cleanup including mic
 
-        log('INIT', 'Viewer loaded and ready');
-        log('INIT', 'User Agent: ' + navigator.userAgent);
+            setStatus('Disconnected', 'red');
+            hideOverlay();
+            iceState.textContent = '-';
+            reconnectInfo.textContent = '';
+
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            refreshBtn.disabled = true;
+            pttBtn.classList.add('disabled');
+        }
+
+        async function refresh() {
+            reconnectAttempts = 0;
+            await cleanup(true); // Keep mic
+            setTimeout(connect, 100);
+        }
+
+        function checkAndReconnect() {
+            if (statusText.textContent !== 'Connected' && lastStreamId) {
+                reconnectAttempts = 0;
+                connect();
+            }
+        }
+
+        function toggleFullscreen() {
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                document.querySelector('.video-container').requestFullscreen();
+            }
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && statusText.textContent !== 'Connected' && lastStreamId) {
+                reconnectAttempts = 0;
+                setTimeout(connect, 500);
+            }
+        });
+
+        // Prevent zoom on double-tap
+        document.addEventListener('touchend', (e) => {
+            if (e.target.closest('.btn-ptt')) return;
+            e.preventDefault();
+        }, { passive: false });
+
+        console.log('Viewer ready - Push-to-talk enabled');
     </script>
 </body>
 </html>
