@@ -193,7 +193,7 @@
         </div>
 
         <div class="video-container">
-            <video id="video" autoplay playsinline muted></video>
+            <video id="video" autoplay playsinline muted style="background: #000;"></video>
 
             <div id="overlay" class="overlay hidden">
                 <div class="spinner"></div>
@@ -509,53 +509,39 @@
             }
 
             pc.ontrack = (e) => {
-                console.log('Track received:', e.track.kind);
-                if (e.track.kind === 'video' && e.streams[0]) {
-                    const stream = e.streams[0];
+                console.log('Track received:', e.track.kind, 'streams:', e.streams.length);
 
-                    // Only update srcObject if it's a different stream
-                    if (video.srcObject !== stream) {
-                        video.srcObject = stream;
-                        currentStreamId = stream.id;
-                    }
+                if (e.streams && e.streams[0]) {
+                    console.log('Setting video srcObject');
+                    video.srcObject = e.streams[0];
 
-                    // Prevent concurrent play attempts
-                    if (!isPlayPending) {
-                        isPlayPending = true;
+                    // Force play after a short delay
+                    setTimeout(() => {
+                        console.log('Attempting to play video, paused:', video.paused, 'readyState:', video.readyState);
                         video.play()
-                            .then(() => {
-                                isPlayPending = false;
-                                console.log('Video playback started');
-                            })
-                            .catch((err) => {
-                                isPlayPending = false;
-                                if (err.name === 'AbortError') {
-                                    // Ignore AbortError - new load request interrupted, which is fine
-                                    console.log('Play interrupted by new load - this is normal during reconnection');
-                                    return;
-                                }
-                                // For NotAllowedError, try muted autoplay
-                                console.log('Play failed, trying muted:', err.name);
+                            .then(() => console.log('Video playing successfully'))
+                            .catch(err => {
+                                console.log('Play error:', err.name, '- trying muted');
                                 video.muted = true;
-                                video.play().catch(e => console.log('Muted play also failed:', e));
+                                video.play()
+                                    .then(() => console.log('Muted video playing'))
+                                    .catch(e2 => console.error('Muted play failed:', e2));
                             });
+                    }, 100);
+
+                    if (e.track.kind === 'video') {
+                        clearTimeout(connectionTimer);
+                        isConnecting = false;
+                        reconnectAttempts = 0;
+                        setStatus('Connected', 'green');
+                        hideOverlay();
+                        disconnectBtn.disabled = false;
+                        refreshBtn.disabled = false;
+                        if (micPermissionGranted) pttBtn.classList.remove('disabled');
+                        reconnectInfo.textContent = '';
                     }
-
-                    clearTimeout(connectionTimer);
-                    isConnecting = false;
-                    reconnectAttempts = 0;
-
-                    setStatus('Connected', 'green');
-                    hideOverlay();
-                    disconnectBtn.disabled = false;
-                    refreshBtn.disabled = false;
-
-                    // Enable PTT button if mic is available
-                    if (micPermissionGranted) {
-                        pttBtn.classList.remove('disabled');
-                    }
-
-                    reconnectInfo.textContent = '';
+                } else {
+                    console.warn('No streams in track event');
                 }
             };
 
@@ -725,15 +711,11 @@
             lastTouchEnd = now;
         }, { passive: false });
 
-        // Ensure video plays when ready
-        video.addEventListener('canplay', () => {
-            if (video.paused && video.srcObject && !isPlayPending) {
-                isPlayPending = true;
-                video.play()
-                    .then(() => { isPlayPending = false; })
-                    .catch(() => { isPlayPending = false; });
-            }
-        });
+        // Debug video events
+        video.addEventListener('canplay', () => console.log('Video canplay event'));
+        video.addEventListener('playing', () => console.log('Video playing event'));
+        video.addEventListener('error', (e) => console.error('Video error:', e));
+        video.addEventListener('loadedmetadata', () => console.log('Video metadata loaded, size:', video.videoWidth, 'x', video.videoHeight));
 
         console.log('Viewer ready - Auto-reconnect enabled');
     </script>
