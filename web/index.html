@@ -237,6 +237,10 @@
         let isTalking = false;
         let micPermissionGranted = false;
 
+        // Playback state
+        let isPlayPending = false;
+        let currentStreamId = null;
+
         const video = document.getElementById('video');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
@@ -421,8 +425,35 @@
             pc.ontrack = (e) => {
                 console.log('Track received:', e.track.kind);
                 if (e.track.kind === 'video' && e.streams[0]) {
-                    video.srcObject = e.streams[0];
-                    video.play().catch(() => { video.muted = true; video.play(); });
+                    const stream = e.streams[0];
+
+                    // Only update srcObject if it's a different stream
+                    if (video.srcObject !== stream) {
+                        video.srcObject = stream;
+                        currentStreamId = stream.id;
+                    }
+
+                    // Prevent concurrent play attempts
+                    if (!isPlayPending) {
+                        isPlayPending = true;
+                        video.play()
+                            .then(() => {
+                                isPlayPending = false;
+                                console.log('Video playback started');
+                            })
+                            .catch((err) => {
+                                isPlayPending = false;
+                                if (err.name === 'AbortError') {
+                                    // Ignore AbortError - new load request interrupted, which is fine
+                                    console.log('Play interrupted by new load - this is normal during reconnection');
+                                    return;
+                                }
+                                // For NotAllowedError, try muted autoplay
+                                console.log('Play failed, trying muted:', err.name);
+                                video.muted = true;
+                                video.play().catch(e => console.log('Muted play also failed:', e));
+                            });
+                    }
 
                     clearTimeout(connectionTimer);
                     isConnecting = false;
@@ -523,6 +554,8 @@
                 video.srcObject.getTracks().forEach(t => t.stop());
                 video.srcObject = null;
             }
+            isPlayPending = false;
+            currentStreamId = null;
 
             // Only cleanup mic if explicitly requested
             if (!keepMic && localStream) {
@@ -585,7 +618,17 @@
             e.preventDefault();
         }, { passive: false });
 
-        console.log('Viewer ready - Push-to-talk enabled');
+        // Ensure video plays when ready
+        video.addEventListener('canplay', () => {
+            if (video.paused && video.srcObject && !isPlayPending) {
+                isPlayPending = true;
+                video.play()
+                    .then(() => { isPlayPending = false; })
+                    .catch(() => { isPlayPending = false; });
+            }
+        });
+
+        console.log('Viewer ready - Auto-reconnect enabled');
     </script>
 </body>
 </html>
