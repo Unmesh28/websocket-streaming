@@ -65,14 +65,19 @@ private:
     
     // GStreamer callbacks
     static void onNegotiationNeeded(GstElement* webrtc, gpointer user_data);
-    static void onIceCandidate(GstElement* webrtc, guint mlineindex, 
+    static void onIceCandidate(GstElement* webrtc, guint mlineindex,
                               gchar* candidate, gpointer user_data);
     static void onOfferCreated(GstPromise* promise, gpointer user_data);
-    
+    static void onIncomingStream(GstElement* webrtc, GstPad* pad, gpointer user_data);
+    static void onIncomingDecodebinStream(GstElement* decodebin, GstPad* pad, gpointer user_data);
+
     // Pipeline creation
     bool createPipeline(const std::string& video_device,
                        const std::string& audio_device,
                        CameraType camera_type);
+
+    // Audio output for incoming stream
+    GstElement* audio_sink_;
 };
 
 #endif // WEBRTC_STREAM_H

@@ -94,7 +94,8 @@ WebRTCStream::WebRTCStream(const std::string& stream_id)
     , pipeline_(nullptr)
     , webrtcbin_(nullptr)
     , is_streaming_(false)
-    , audio_input_enabled_(false) {
+    , audio_input_enabled_(false)
+    , audio_sink_(nullptr) {
     LOG_VAR("INIT", "WebRTCStream created: ", stream_id);
 }
 
@@ -202,7 +203,22 @@ bool WebRTCStream::createPipeline(const std::string& video_device,
                     G_CALLBACK(onNegotiationNeeded), this);
     g_signal_connect(webrtcbin_, "on-ice-candidate",
                     G_CALLBACK(onIceCandidate), this);
-    LOG("PIPELINE", "WebRTC signals connected");
+    g_signal_connect(webrtcbin_, "pad-added",
+                    G_CALLBACK(onIncomingStream), this);
+    LOG("PIPELINE", "WebRTC signals connected (including pad-added for incoming audio)");
+
+    // Add transceiver for receiving audio from viewer (bidirectional audio)
+    GstWebRTCRTPTransceiverDirection direction = GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY;
+    GstCaps* audio_caps = gst_caps_from_string("application/x-rtp,media=audio,encoding-name=OPUS,payload=97");
+    GstWebRTCRTPTransceiver* trans = nullptr;
+    g_signal_emit_by_name(webrtcbin_, "add-transceiver", direction, audio_caps, &trans);
+    gst_caps_unref(audio_caps);
+    if (trans) {
+        LOG("PIPELINE", "Added audio receive transceiver for bidirectional audio");
+        gst_object_unref(trans);
+    } else {
+        LOG("PIPELINE-WARN", "Failed to add audio receive transceiver");
+    }
 
     LOG("PIPELINE", "Pipeline created successfully");
     return true;
@@ -354,4 +370,103 @@ void WebRTCStream::setIceCandidateCallback(
 void WebRTCStream::enableAudioInput(bool enable) {
     audio_input_enabled_ = enable;
     LOG_VAR("AUDIO", "Audio input ", (enable ? "enabled" : "disabled"));
+}
+
+// Handle incoming streams from WebRTC (audio from viewer)
+void WebRTCStream::onIncomingStream(GstElement* webrtc, GstPad* pad, gpointer user_data) {
+    WebRTCStream* stream = static_cast<WebRTCStream*>(user_data);
+
+    if (GST_PAD_DIRECTION(pad) != GST_PAD_SRC) {
+        return;
+    }
+
+    LOG("INCOMING", "New incoming pad added from WebRTC");
+
+    // Create decodebin to handle the incoming stream
+    GstElement* decodebin = gst_element_factory_make("decodebin", nullptr);
+    if (!decodebin) {
+        LOG("INCOMING-ERROR", "Failed to create decodebin");
+        return;
+    }
+
+    g_signal_connect(decodebin, "pad-added", G_CALLBACK(onIncomingDecodebinStream), user_data);
+
+    gst_bin_add(GST_BIN(stream->pipeline_), decodebin);
+    gst_element_sync_state_with_parent(decodebin);
+
+    GstPad* sinkpad = gst_element_get_static_pad(decodebin, "sink");
+    GstPadLinkReturn ret = gst_pad_link(pad, sinkpad);
+    gst_object_unref(sinkpad);
+
+    if (ret != GST_PAD_LINK_OK) {
+        LOG("INCOMING-ERROR", "Failed to link incoming pad to decodebin");
+    } else {
+        LOG("INCOMING", "Incoming pad linked to decodebin successfully");
+    }
+}
+
+// Handle decoded stream (audio output to speaker)
+void WebRTCStream::onIncomingDecodebinStream(GstElement* decodebin, GstPad* pad, gpointer user_data) {
+    WebRTCStream* stream = static_cast<WebRTCStream*>(user_data);
+
+    if (!gst_pad_has_current_caps(pad)) {
+        LOG("DECODEBIN", "Pad has no caps yet, waiting...");
+        return;
+    }
+
+    GstCaps* caps = gst_pad_get_current_caps(pad);
+    GstStructure* s = gst_caps_get_structure(caps, 0);
+    const gchar* name = gst_structure_get_name(s);
+
+    LOG_VAR("DECODEBIN", "Decoded pad type: ", name);
+
+    if (g_str_has_prefix(name, "audio")) {
+        LOG("AUDIO-OUT", "Setting up audio output for incoming viewer audio");
+
+        // Create audio output pipeline: audioconvert -> audioresample -> alsasink
+        GstElement* audioconvert = gst_element_factory_make("audioconvert", "incoming_audioconvert");
+        GstElement* audioresample = gst_element_factory_make("audioresample", "incoming_audioresample");
+        GstElement* volume = gst_element_factory_make("volume", "incoming_volume");
+        GstElement* audiosink = gst_element_factory_make("alsasink", "incoming_audiosink");
+
+        if (!audioconvert || !audioresample || !volume || !audiosink) {
+            LOG("AUDIO-OUT-ERROR", "Failed to create audio output elements");
+            gst_caps_unref(caps);
+            return;
+        }
+
+        // Set volume (can be adjusted)
+        g_object_set(volume, "volume", 1.0, nullptr);
+
+        // Try to use the default ALSA device, or hw:0,0 as fallback
+        g_object_set(audiosink, "device", "default", nullptr);
+
+        gst_bin_add_many(GST_BIN(stream->pipeline_), audioconvert, audioresample, volume, audiosink, nullptr);
+
+        gst_element_sync_state_with_parent(audioconvert);
+        gst_element_sync_state_with_parent(audioresample);
+        gst_element_sync_state_with_parent(volume);
+        gst_element_sync_state_with_parent(audiosink);
+
+        // Link elements
+        if (!gst_element_link_many(audioconvert, audioresample, volume, audiosink, nullptr)) {
+            LOG("AUDIO-OUT-ERROR", "Failed to link audio output elements");
+            gst_caps_unref(caps);
+            return;
+        }
+
+        // Link decodebin pad to audioconvert
+        GstPad* sinkpad = gst_element_get_static_pad(audioconvert, "sink");
+        GstPadLinkReturn ret = gst_pad_link(pad, sinkpad);
+        gst_object_unref(sinkpad);
+
+        if (ret != GST_PAD_LINK_OK) {
+            LOG("AUDIO-OUT-ERROR", "Failed to link decodebin to audio output");
+        } else {
+            LOG("AUDIO-OUT", "Incoming audio connected to speaker successfully!");
+            stream->audio_sink_ = audiosink;
+        }
+    }
+
+    gst_caps_unref(caps);
 }
