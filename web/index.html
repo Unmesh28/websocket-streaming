@@ -250,6 +250,7 @@
         // Playback state
         let isPlayPending = false;
         let currentStreamId = null;
+        let skipNextCleanup = false;  // Flag to skip cleanup when called from refresh()
 
         const video = document.getElementById('video');
         const statusDot = document.getElementById('statusDot');
@@ -402,7 +403,10 @@
         }
 
         async function connect() {
-            if (isConnecting) return;
+            if (isConnecting) {
+                console.log('Connect: Already connecting, ignoring');
+                return;
+            }
 
             const streamId = document.getElementById('streamId').value.trim();
             if (!streamId) { alert('Enter stream ID'); return; }
@@ -411,7 +415,13 @@
             isConnecting = true;
             reconnectInfo.textContent = '';
 
-            await cleanup();
+            // Only cleanup if not already done by refresh()
+            if (skipNextCleanup) {
+                skipNextCleanup = false;
+                console.log('Connect: Skipping cleanup (already done by refresh)');
+            } else {
+                await cleanup();
+            }
 
             // Request mic permission if not already granted
             if (!micPermissionGranted) {
@@ -489,8 +499,12 @@
                 }
             };
 
-            ws.onerror = () => handleConnectionFailure('Connection error');
-            ws.onclose = () => {
+            ws.onerror = (e) => {
+                console.log('WebSocket error:', e);
+                handleConnectionFailure('Connection error');
+            };
+            ws.onclose = (e) => {
+                console.log('WebSocket closed, code:', e.code, 'reason:', e.reason, 'isConnecting:', isConnecting);
                 if (isConnecting || statusText.textContent === 'Connected') {
                     handleConnectionFailure('Connection lost');
                 }
@@ -512,22 +526,51 @@
                 console.log('Track received:', e.track.kind, 'streams:', e.streams.length);
 
                 if (e.streams && e.streams[0]) {
-                    console.log('Setting video srcObject');
-                    video.srcObject = e.streams[0];
+                    const stream = e.streams[0];
 
-                    // Force play after a short delay
-                    setTimeout(() => {
-                        console.log('Attempting to play video, paused:', video.paused, 'readyState:', video.readyState);
-                        video.play()
-                            .then(() => console.log('Video playing successfully'))
-                            .catch(err => {
-                                console.log('Play error:', err.name, '- trying muted');
-                                video.muted = true;
-                                video.play()
-                                    .then(() => console.log('Muted video playing'))
-                                    .catch(e2 => console.error('Muted play failed:', e2));
-                            });
-                    }, 100);
+                    // Only set srcObject if it's a different stream
+                    if (video.srcObject !== stream) {
+                        console.log('Setting video srcObject (new stream)');
+                        video.srcObject = stream;
+                        currentStreamId = stream.id;
+                    } else {
+                        console.log('Same stream, skipping srcObject assignment');
+                    }
+
+                    // Only attempt play if not already pending and video is paused
+                    if (!isPlayPending && video.paused) {
+                        isPlayPending = true;
+                        // Force play after a short delay
+                        setTimeout(() => {
+                            // Double-check we still have the same stream and pc is valid
+                            if (!pc || video.srcObject !== stream) {
+                                console.log('Play cancelled: stream changed or connection lost');
+                                isPlayPending = false;
+                                return;
+                            }
+                            console.log('Attempting to play video, paused:', video.paused, 'readyState:', video.readyState);
+                            video.play()
+                                .then(() => {
+                                    console.log('Video playing successfully');
+                                    isPlayPending = false;
+                                })
+                                .catch(err => {
+                                    console.log('Play error:', err.name, '- trying muted');
+                                    video.muted = true;
+                                    video.play()
+                                        .then(() => {
+                                            console.log('Muted video playing');
+                                            isPlayPending = false;
+                                        })
+                                        .catch(e2 => {
+                                            console.error('Muted play failed:', e2);
+                                            isPlayPending = false;
+                                        });
+                                });
+                        }, 100);
+                    } else {
+                        console.log('Play already pending or video not paused, skipping play attempt');
+                    }
 
                     if (e.track.kind === 'video') {
                         clearTimeout(connectionTimer);
@@ -602,6 +645,12 @@
             disconnectBtn.disabled = true;
             refreshBtn.disabled = true;
 
+            // Don't auto-reconnect if a manual refresh is in progress
+            if (skipNextCleanup) {
+                console.log('handleConnectionFailure: Manual refresh in progress, skipping auto-reconnect');
+                return;
+            }
+
             if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 reconnectAttempts++;
                 // Quick retry for first few attempts, then slow down
@@ -617,9 +666,13 @@
         }
 
         async function cleanup(keepMic = false) {
+            console.log('Cleanup: Starting cleanup, keepMic:', keepMic);
             clearTimeout(reconnectTimer);
             clearTimeout(connectionTimer);
             clearInterval(wsPingTimer);
+            reconnectTimer = null;
+            connectionTimer = null;
+            wsPingTimer = null;
 
             if (pc) {
                 pc.ontrack = null;
@@ -671,9 +724,28 @@
         }
 
         async function refresh() {
+            console.log('Refresh: Starting refresh');
+
+            // Cancel any pending auto-reconnect
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+
             reconnectAttempts = 0;
+            isConnecting = false;  // Reset in case previous connect was stuck
+
             await cleanup(true); // Keep mic
-            setTimeout(connect, 100);
+
+            // Set flag so connect() doesn't cleanup again
+            skipNextCleanup = true;
+
+            // Give server more time to process the disconnect
+            // before we try to reconnect
+            showOverlay('Reconnecting...');
+            setTimeout(() => {
+                if (skipNextCleanup) {  // Only connect if not cancelled
+                    connect();
+                }
+            }, 500);  // Increased from 100ms to 500ms
         }
 
         function checkAndReconnect() {
@@ -693,6 +765,12 @@
 
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && statusText.textContent !== 'Connected' && lastStreamId) {
+                // Don't interfere if a manual refresh is in progress
+                if (skipNextCleanup) {
+                    console.log('Visibility: Skipping auto-reconnect, refresh in progress');
+                    return;
+                }
+                console.log('Visibility: Page visible, attempting reconnect');
                 reconnectAttempts = 0;
                 setTimeout(connect, 500);
             }
