@@ -225,9 +225,10 @@
     <script>
         // ============== CONFIG ==============
         const AUTO_RECONNECT = true;
-        const RECONNECT_DELAY = 3000;
-        const MAX_RECONNECT_ATTEMPTS = 100;
-        const CONNECTION_TIMEOUT = 20000;
+        const RECONNECT_DELAY = 2000;
+        const MAX_RECONNECT_ATTEMPTS = 1000;
+        const CONNECTION_TIMEOUT = 30000;
+        const WS_PING_INTERVAL = 25000;
         // ====================================
 
         let ws = null;
@@ -238,6 +239,7 @@
         let reconnectTimer = null;
         let connectionTimer = null;
         let lastStreamId = '';
+        let wsPingTimer = null;
 
         // Audio/microphone
         let localStream = null;
@@ -279,16 +281,26 @@
 
         // Check if getUserMedia is supported
         function isMicSupported() {
+            // getUserMedia requires secure context (HTTPS or localhost)
+            if (!window.isSecureContext) {
+                console.warn('getUserMedia requires HTTPS. Current context is not secure.');
+                return false;
+            }
             return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
         }
 
         // Request microphone permission
         async function requestMicPermission() {
             if (!isMicSupported()) {
-                console.error('getUserMedia not supported in this browser/WebView');
+                if (!window.isSecureContext) {
+                    console.error('Microphone requires HTTPS. Use https:// or access via localhost');
+                    micState.textContent = 'Need HTTPS';
+                } else {
+                    console.error('getUserMedia not supported in this browser/WebView');
+                    micState.textContent = 'Not supported';
+                }
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
-                micState.textContent = 'Not supported';
                 return false;
             }
 
@@ -426,6 +438,14 @@
             ws.onopen = () => {
                 console.log('WebSocket connected');
                 ws.send(JSON.stringify({ type: 'join', stream_id: streamId }));
+
+                // Start WebSocket keep-alive ping
+                clearInterval(wsPingTimer);
+                wsPingTimer = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, WS_PING_INTERVAL);
             };
 
             ws.onmessage = async (e) => {
@@ -529,8 +549,20 @@
 
             pc.oniceconnectionstatechange = () => {
                 iceState.textContent = pc.iceConnectionState;
-                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-                    handleConnectionFailure('ICE ' + pc.iceConnectionState);
+                console.log('ICE state:', pc.iceConnectionState);
+
+                if (pc.iceConnectionState === 'failed') {
+                    handleConnectionFailure('ICE failed');
+                } else if (pc.iceConnectionState === 'disconnected') {
+                    // ICE disconnected can recover, wait a bit before failing
+                    console.log('ICE disconnected - waiting for recovery...');
+                    setTimeout(() => {
+                        if (pc && pc.iceConnectionState === 'disconnected') {
+                            handleConnectionFailure('ICE disconnected');
+                        }
+                    }, 5000);
+                } else if (pc.iceConnectionState === 'connected') {
+                    console.log('ICE connected successfully');
                 }
             };
 
@@ -574,8 +606,9 @@
 
             if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 reconnectAttempts++;
-                const delay = Math.min(RECONNECT_DELAY * reconnectAttempts, 30000);
-                reconnectInfo.textContent = `Reconnecting in ${delay/1000}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+                // Quick retry for first few attempts, then slow down
+                const delay = reconnectAttempts <= 3 ? RECONNECT_DELAY : Math.min(RECONNECT_DELAY * Math.floor(reconnectAttempts / 3), 15000);
+                reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`;
                 showOverlay(`${reason} - Reconnecting...`);
 
                 reconnectTimer = setTimeout(() => {
@@ -588,6 +621,7 @@
         async function cleanup(keepMic = false) {
             clearTimeout(reconnectTimer);
             clearTimeout(connectionTimer);
+            clearInterval(wsPingTimer);
 
             if (pc) {
                 pc.ontrack = null;
