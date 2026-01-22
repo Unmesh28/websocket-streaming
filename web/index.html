@@ -281,43 +281,47 @@
 
         // Check if getUserMedia is supported
         function isMicSupported() {
-            // getUserMedia requires secure context (HTTPS or localhost)
-            if (!window.isSecureContext) {
-                console.warn('getUserMedia requires HTTPS. Current context is not secure.');
-                return false;
+            // Check if getUserMedia API exists
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                return true;
             }
-            return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+            // In some browsers/WebViews, isSecureContext may be false but mic still works
+            // So we'll try anyway and handle errors
+            console.warn('getUserMedia may not be available. isSecureContext:', window.isSecureContext);
+            return false;
         }
 
         // Request microphone permission
         async function requestMicPermission() {
-            if (!isMicSupported()) {
-                if (!window.isSecureContext) {
-                    console.error('Microphone requires HTTPS. Use https:// or access via localhost');
-                    micState.textContent = 'Need HTTPS';
-                } else {
-                    console.error('getUserMedia not supported in this browser/WebView');
-                    micState.textContent = 'Not supported';
-                }
+            // First check if API exists
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                console.error('getUserMedia API not available');
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
+                micState.textContent = 'Not available';
                 return false;
             }
 
             try {
                 console.log('Requesting microphone permission...');
 
-                // For WebView compatibility, use simpler constraints first
-                const constraints = {
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 48000
-                    }
-                };
+                // Try simple constraints first for maximum compatibility
+                let constraints = { audio: true };
 
-                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (simpleErr) {
+                    console.log('Simple audio constraints failed, trying detailed:', simpleErr.message);
+                    // Try with detailed constraints
+                    constraints = {
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    };
+                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                }
 
                 audioTrack = localStream.getAudioTracks()[0];
                 if (audioTrack) {
@@ -331,10 +335,18 @@
                     throw new Error('No audio track available');
                 }
             } catch (e) {
-                console.error('Microphone permission denied:', e.name, e.message);
+                console.error('Microphone error:', e.name, e.message);
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
-                micState.textContent = e.name === 'NotAllowedError' ? 'Denied' : 'Error';
+                if (e.name === 'NotAllowedError') {
+                    micState.textContent = 'Denied';
+                } else if (e.name === 'NotFoundError') {
+                    micState.textContent = 'No mic';
+                } else if (e.name === 'NotSupportedError' || e.name === 'TypeError') {
+                    micState.textContent = 'Need HTTPS';
+                } else {
+                    micState.textContent = 'Error';
+                }
                 return false;
             }
         }
