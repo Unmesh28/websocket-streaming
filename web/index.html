@@ -225,9 +225,10 @@
     <script>
         // ============== CONFIG ==============
         const AUTO_RECONNECT = true;
-        const RECONNECT_DELAY = 3000;
-        const MAX_RECONNECT_ATTEMPTS = 100;
-        const CONNECTION_TIMEOUT = 20000;
+        const RECONNECT_DELAY = 2000;
+        const MAX_RECONNECT_ATTEMPTS = 1000;
+        const CONNECTION_TIMEOUT = 30000;
+        const WS_PING_INTERVAL = 25000;
         // ====================================
 
         let ws = null;
@@ -238,6 +239,7 @@
         let reconnectTimer = null;
         let connectionTimer = null;
         let lastStreamId = '';
+        let wsPingTimer = null;
 
         // Audio/microphone
         let localStream = null;
@@ -279,33 +281,47 @@
 
         // Check if getUserMedia is supported
         function isMicSupported() {
-            return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+            // Check if getUserMedia API exists
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                return true;
+            }
+            // In some browsers/WebViews, isSecureContext may be false but mic still works
+            // So we'll try anyway and handle errors
+            console.warn('getUserMedia may not be available. isSecureContext:', window.isSecureContext);
+            return false;
         }
 
         // Request microphone permission
         async function requestMicPermission() {
-            if (!isMicSupported()) {
-                console.error('getUserMedia not supported in this browser/WebView');
+            // First check if API exists
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                console.error('getUserMedia API not available');
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
-                micState.textContent = 'Not supported';
+                micState.textContent = 'Not available';
                 return false;
             }
 
             try {
                 console.log('Requesting microphone permission...');
 
-                // For WebView compatibility, use simpler constraints first
-                const constraints = {
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 48000
-                    }
-                };
+                // Try simple constraints first for maximum compatibility
+                let constraints = { audio: true };
 
-                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (simpleErr) {
+                    console.log('Simple audio constraints failed, trying detailed:', simpleErr.message);
+                    // Try with detailed constraints
+                    constraints = {
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    };
+                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                }
 
                 audioTrack = localStream.getAudioTracks()[0];
                 if (audioTrack) {
@@ -319,10 +335,18 @@
                     throw new Error('No audio track available');
                 }
             } catch (e) {
-                console.error('Microphone permission denied:', e.name, e.message);
+                console.error('Microphone error:', e.name, e.message);
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
-                micState.textContent = e.name === 'NotAllowedError' ? 'Denied' : 'Error';
+                if (e.name === 'NotAllowedError') {
+                    micState.textContent = 'Denied';
+                } else if (e.name === 'NotFoundError') {
+                    micState.textContent = 'No mic';
+                } else if (e.name === 'NotSupportedError' || e.name === 'TypeError') {
+                    micState.textContent = 'Need HTTPS';
+                } else {
+                    micState.textContent = 'Error';
+                }
                 return false;
             }
         }
@@ -426,6 +450,14 @@
             ws.onopen = () => {
                 console.log('WebSocket connected');
                 ws.send(JSON.stringify({ type: 'join', stream_id: streamId }));
+
+                // Start WebSocket keep-alive ping
+                clearInterval(wsPingTimer);
+                wsPingTimer = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, WS_PING_INTERVAL);
             };
 
             ws.onmessage = async (e) => {
@@ -529,8 +561,20 @@
 
             pc.oniceconnectionstatechange = () => {
                 iceState.textContent = pc.iceConnectionState;
-                if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-                    handleConnectionFailure('ICE ' + pc.iceConnectionState);
+                console.log('ICE state:', pc.iceConnectionState);
+
+                if (pc.iceConnectionState === 'failed') {
+                    handleConnectionFailure('ICE failed');
+                } else if (pc.iceConnectionState === 'disconnected') {
+                    // ICE disconnected can recover, wait a bit before failing
+                    console.log('ICE disconnected - waiting for recovery...');
+                    setTimeout(() => {
+                        if (pc && pc.iceConnectionState === 'disconnected') {
+                            handleConnectionFailure('ICE disconnected');
+                        }
+                    }, 5000);
+                } else if (pc.iceConnectionState === 'connected') {
+                    console.log('ICE connected successfully');
                 }
             };
 
@@ -574,8 +618,9 @@
 
             if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 reconnectAttempts++;
-                const delay = Math.min(RECONNECT_DELAY * reconnectAttempts, 30000);
-                reconnectInfo.textContent = `Reconnecting in ${delay/1000}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`;
+                // Quick retry for first few attempts, then slow down
+                const delay = reconnectAttempts <= 3 ? RECONNECT_DELAY : Math.min(RECONNECT_DELAY * Math.floor(reconnectAttempts / 3), 15000);
+                reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`;
                 showOverlay(`${reason} - Reconnecting...`);
 
                 reconnectTimer = setTimeout(() => {
@@ -588,6 +633,7 @@
         async function cleanup(keepMic = false) {
             clearTimeout(reconnectTimer);
             clearTimeout(connectionTimer);
+            clearInterval(wsPingTimer);
 
             if (pc) {
                 pc.ontrack = null;

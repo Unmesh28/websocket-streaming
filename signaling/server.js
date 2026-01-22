@@ -83,6 +83,11 @@ wss.on('connection', (ws, req) => {
                     handleIceCandidate(ws, data);
                     break;
 
+                case 'ping':
+                    // Respond to keep-alive ping
+                    ws.send(JSON.stringify({ type: 'pong' }));
+                    break;
+
                 default:
                     console.log(`[WARN] Unknown message type: ${data.type}`);
             }
