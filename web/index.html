@@ -666,10 +666,17 @@
             }
         });
 
-        // Prevent zoom on double-tap
+        // Prevent zoom on double-tap (but allow buttons to work)
+        let lastTouchEnd = 0;
         document.addEventListener('touchend', (e) => {
-            if (e.target.closest('.btn-ptt')) return;
-            e.preventDefault();
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                // Double tap detected - prevent zoom only on video area
+                if (e.target.closest('.video-container') && !e.target.closest('button')) {
+                    e.preventDefault();
+                }
+            }
+            lastTouchEnd = now;
         }, { passive: false });
 
         // Ensure video plays when ready
