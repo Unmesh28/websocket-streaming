@@ -8,8 +8,16 @@
     <!-- Microphone for push-to-talk -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 
+    <!-- Camera permission (some WebViews need this for getUserMedia) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
     <!-- Optional: for audio playback -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+
+    <!-- Hardware features (optional - allows install on devices without mic/camera) -->
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
 
     <application
         android:label="Pi Camera Viewer"
