@@ -42,11 +42,13 @@ app.use(express.static(path.join(__dirname, '../web')));
 const broadcasters = new Map(); // streamId -> { ws, viewers: Set }
 const viewers = new Map();       // viewerId -> { ws, streamId, broadcasterId }
 const connections = new Map();   // ws -> { clientId, clientRole }
+const pendingCleanups = new Map(); // viewerId -> cleanup timeout (for rate limiting)
 
 let nextViewerId = 1;
 
 function logStatus() {
-    console.log(`[STATUS] Broadcasters: ${broadcasters.size}, Viewers: ${viewers.size}, Connections: ${connections.size}`);
+    const pendingCount = pendingCleanups.size;
+    console.log(`[STATUS] Broadcasters: ${broadcasters.size}, Viewers: ${viewers.size}, Connections: ${connections.size}${pendingCount > 0 ? ', Pending cleanups: ' + pendingCount : ''}`);
 }
 
 wss.on('connection', (ws, req) => {
@@ -171,6 +173,12 @@ function handleJoin(ws, data) {
         const oldViewerId = connInfo.clientId;
         console.log(`[JOIN] WebSocket already has viewer ${oldViewerId}, cleaning up before rejoin`);
 
+        // Cancel any pending cleanup for the old viewer
+        if (pendingCleanups.has(oldViewerId)) {
+            clearTimeout(pendingCleanups.get(oldViewerId));
+            pendingCleanups.delete(oldViewerId);
+        }
+
         // Clean up old viewer from previous stream
         const oldViewer = viewers.get(oldViewerId);
         if (oldViewer) {
@@ -224,24 +232,33 @@ function handleJoin(ws, data) {
     viewers.set(viewerId, {
         ws: ws,
         streamId: streamId,
-        broadcasterId: streamId
+        broadcasterId: streamId,
+        joinedAt: Date.now()
     });
 
     console.log(`[JOIN] Viewer ${viewerId} joined stream: ${streamId} (total viewers: ${broadcaster.viewers.size})`);
     logStatus();
 
-    // Notify broadcaster
-    try {
-        broadcaster.ws.send(JSON.stringify({
-            type: 'viewer-joined',
-            viewer_id: viewerId
-        }));
-        console.log(`[JOIN] Notified broadcaster about ${viewerId}`);
-    } catch (e) {
-        console.error(`[JOIN] Failed to notify broadcaster:`, e);
-    }
+    // Notify broadcaster - add small delay if there were recent disconnects
+    // This gives the Pi time to cleanup previous peer connections
+    const recentDisconnects = Array.from(pendingCleanups.values()).length;
+    const notifyDelay = recentDisconnects > 0 ? 500 : 0; // 500ms delay if cleanups pending
 
-    // Confirm to viewer
+    setTimeout(() => {
+        try {
+            if (broadcaster.ws.readyState === WebSocket.OPEN) {
+                broadcaster.ws.send(JSON.stringify({
+                    type: 'viewer-joined',
+                    viewer_id: viewerId
+                }));
+                console.log(`[JOIN] Notified broadcaster about ${viewerId}`);
+            }
+        } catch (e) {
+            console.error(`[JOIN] Failed to notify broadcaster:`, e);
+        }
+    }, notifyDelay);
+
+    // Confirm to viewer immediately
     ws.send(JSON.stringify({
         type: 'joined',
         viewer_id: viewerId,
@@ -358,17 +375,36 @@ function handleDisconnect(ws) {
                     }
                     viewers.delete(viewerId);
                 }
+                // Clear any pending cleanups for this viewer
+                if (pendingCleanups.has(viewerId)) {
+                    clearTimeout(pendingCleanups.get(viewerId));
+                    pendingCleanups.delete(viewerId);
+                }
             });
 
             broadcasters.delete(clientId);
         }
     } else if (clientRole === 'viewer' && clientId) {
+        console.log(`[DISCONNECT] Viewer disconnecting: ${clientId}`);
+
+        // Cancel any existing pending cleanup
+        if (pendingCleanups.has(clientId)) {
+            clearTimeout(pendingCleanups.get(clientId));
+            pendingCleanups.delete(clientId);
+        }
+
         const viewer = viewers.get(clientId);
         if (viewer) {
-            // Notify broadcaster
             const broadcaster = broadcasters.get(viewer.broadcasterId);
             if (broadcaster) {
                 broadcaster.viewers.delete(clientId);
+
+                // Add to pending cleanups - give Pi time to process
+                // This prevents rapid disconnect/reconnect from overwhelming the Pi
+                pendingCleanups.set(clientId, setTimeout(() => {
+                    pendingCleanups.delete(clientId);
+                }, 2000)); // Track cleanup for 2 seconds
+
                 try {
                     broadcaster.ws.send(JSON.stringify({
                         type: 'viewer-left',

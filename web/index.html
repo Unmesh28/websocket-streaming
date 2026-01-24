@@ -383,7 +383,9 @@
             await cleanup(true); // Keep mic
             skipNextCleanup = true; // Set flag so connect() doesn't cleanup again
             showOverlay('Reconnecting...');
-            setTimeout(() => { if (skipNextCleanup) connect(); }, 500); // Increased delay for server to process
+            // CRITICAL: Wait longer for Pi to clean up old peer connection
+            // The Pi needs ~2s to cleanup TURN/ICE resources properly
+            setTimeout(() => { if (skipNextCleanup) connect(); }, 2000);
         }
 
         function toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen(); else document.querySelector('.video-container').requestFullscreen(); }
