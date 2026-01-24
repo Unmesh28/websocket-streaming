@@ -6,176 +6,41 @@
     <title>Pi Camera Live Stream</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            min-height: 100vh;
-            color: white;
-            overflow: hidden;
-        }
-        .container {
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-        }
-        .header {
-            padding: 10px 15px;
-            background: rgba(0,0,0,0.5);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; min-height: 100vh; color: white; overflow: hidden; }
+        .container { display: flex; flex-direction: column; height: 100vh; }
+        .header { padding: 10px 15px; background: rgba(0,0,0,0.5); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .header h1 { font-size: 1.2em; flex-shrink: 0; }
-        .video-container {
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #000;
-            position: relative;
-            overflow: hidden;
-        }
-        video {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            background: #000;
-        }
-        .controls {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-wrap: wrap;
-            flex: 1;
-        }
-        input {
-            padding: 8px 12px;
-            font-size: 14px;
-            border: none;
-            border-radius: 6px;
-            background: rgba(255,255,255,0.15);
-            color: white;
-            width: 150px;
-        }
+        .video-container { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; position: relative; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+        .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1; }
+        input { padding: 8px 12px; font-size: 14px; border: none; border-radius: 6px; background: rgba(255,255,255,0.15); color: white; width: 150px; }
         input::placeholder { color: rgba(255,255,255,0.5); }
-        button {
-            padding: 8px 16px;
-            font-size: 14px;
-            font-weight: 600;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
+        button { padding: 8px 16px; font-size: 14px; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
         .btn-connect { background: #4ade80; color: #000; }
         .btn-disconnect { background: #f87171; color: #fff; }
         .btn-refresh { background: #60a5fa; color: #fff; }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
         button:hover:not(:disabled) { transform: scale(1.05); }
-
-        /* Push-to-talk button */
-        .ptt-container {
-            position: absolute;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 100;
-        }
-        .btn-ptt {
-            width: 100px;
-            height: 100px;
-            border-radius: 50%;
-            background: linear-gradient(145deg, #3b82f6, #1d4ed8);
-            border: 4px solid rgba(255,255,255,0.3);
-            color: white;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.15s;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-            user-select: none;
-            -webkit-user-select: none;
-            touch-action: none;
-            -webkit-touch-callout: none;
-        }
-        .btn-ptt:active, .btn-ptt.active {
-            background: linear-gradient(145deg, #ef4444, #dc2626);
-            transform: scale(0.95);
-            box-shadow: 0 2px 10px rgba(239,68,68,0.6);
-        }
+        .ptt-container { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 100; }
+        .btn-ptt { width: 100px; height: 100px; border-radius: 50%; background: linear-gradient(145deg, #3b82f6, #1d4ed8); border: 4px solid rgba(255,255,255,0.3); color: white; font-size: 14px; font-weight: bold; cursor: pointer; transition: all 0.15s; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 4px 15px rgba(0,0,0,0.4); user-select: none; -webkit-user-select: none; touch-action: none; -webkit-touch-callout: none; }
+        .btn-ptt:active, .btn-ptt.active { background: linear-gradient(145deg, #ef4444, #dc2626); transform: scale(0.95); box-shadow: 0 2px 10px rgba(239,68,68,0.6); }
         .btn-ptt .icon { font-size: 32px; margin-bottom: 4px; }
-        .btn-ptt.disabled {
-            opacity: 0.4;
-            pointer-events: none;
-            background: linear-gradient(145deg, #6b7280, #4b5563);
-        }
-        .btn-ptt.no-mic {
-            background: linear-gradient(145deg, #6b7280, #4b5563);
-            pointer-events: auto;
-        }
-
-        .status-bar {
-            padding: 8px 15px;
-            background: rgba(0,0,0,0.7);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 12px;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
+        .btn-ptt.disabled { opacity: 0.4; pointer-events: none; background: linear-gradient(145deg, #6b7280, #4b5563); }
+        .btn-ptt.no-mic { background: linear-gradient(145deg, #6b7280, #4b5563); pointer-events: auto; }
+        .status-bar { padding: 8px 15px; background: rgba(0,0,0,0.7); display: flex; justify-content: space-between; align-items: center; font-size: 12px; flex-wrap: wrap; gap: 10px; }
         .status { display: flex; gap: 15px; flex-wrap: wrap; }
         .status span { display: flex; align-items: center; gap: 5px; }
-        .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-        }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
         .dot-green { background: #4ade80; }
         .dot-red { background: #f87171; }
         .dot-yellow { background: #fbbf24; animation: pulse 1s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-
-        .overlay {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            text-align: center;
-            background: rgba(0,0,0,0.8);
-            padding: 20px 30px;
-            border-radius: 10px;
-        }
+        .overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; background: rgba(0,0,0,0.8); padding: 20px 30px; border-radius: 10px; }
         .overlay.hidden { display: none; }
-        .spinner {
-            width: 40px;
-            height: 40px;
-            border: 3px solid rgba(255,255,255,0.3);
-            border-top-color: #4ade80;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 10px;
-        }
+        .spinner { width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #4ade80; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 10px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .fullscreen-btn { background: rgba(255,255,255,0.2); color: white; padding: 6px 10px; }
-
-        .mic-status {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(0,0,0,0.7);
-            padding: 5px 10px;
-            border-radius: 5px;
-            font-size: 12px;
-            display: none;
-        }
+        .mic-status { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); padding: 5px 10px; border-radius: 5px; font-size: 12px; display: none; }
         .mic-status.active { display: block; background: rgba(239,68,68,0.8); }
     </style>
 </head>
@@ -191,27 +56,16 @@
                 <button class="fullscreen-btn" onclick="toggleFullscreen()">⛶</button>
             </div>
         </div>
-
         <div class="video-container">
             <video id="video" autoplay playsinline muted style="background: #000;"></video>
-
-            <div id="overlay" class="overlay hidden">
-                <div class="spinner"></div>
-                <div id="overlayText">Connecting...</div>
-            </div>
-
+            <div id="overlay" class="overlay hidden"><div class="spinner"></div><div id="overlayText">Connecting...</div></div>
             <div id="micStatus" class="mic-status">🎤 Transmitting...</div>
-
             <div class="ptt-container">
-                <button id="pttBtn" class="btn-ptt disabled no-mic"
-                        onmousedown="startTalk()" onmouseup="stopTalk()" onmouseleave="stopTalk()"
-                        ontouchstart="startTalk(event)" ontouchend="stopTalk(event)" ontouchcancel="stopTalk(event)">
-                    <span class="icon">🎤</span>
-                    <span>TALK</span>
+                <button id="pttBtn" class="btn-ptt disabled no-mic" onmousedown="startTalk()" onmouseup="stopTalk()" onmouseleave="stopTalk()" ontouchstart="startTalk(event)" ontouchend="stopTalk(event)" ontouchcancel="stopTalk(event)">
+                    <span class="icon">🎤</span><span>TALK</span>
                 </button>
             </div>
         </div>
-
         <div class="status-bar">
             <div class="status">
                 <span><span id="statusDot" class="dot dot-red"></span> <span id="statusText">Disconnected</span></span>
@@ -221,580 +75,149 @@
             <div id="reconnectInfo"></div>
         </div>
     </div>
-
     <script>
-        // ============== CONFIG ==============
-        const AUTO_RECONNECT = true;
-        const RECONNECT_DELAY = 2000;
-        const MAX_RECONNECT_ATTEMPTS = 1000;
-        const CONNECTION_TIMEOUT = 30000;
-        const WS_PING_INTERVAL = 25000;
-        // ====================================
+        const AUTO_RECONNECT = true, RECONNECT_DELAY = 2000, MAX_RECONNECT_ATTEMPTS = 1000, CONNECTION_TIMEOUT = 30000, WS_PING_INTERVAL = 25000;
+        let ws = null, pc = null, iceServers = null, isConnecting = false, reconnectAttempts = 0, reconnectTimer = null, connectionTimer = null, lastStreamId = '', wsPingTimer = null;
+        let localStream = null, audioTrack = null, isTalking = false, micPermissionGranted = false, isPlayPending = false, currentStreamId = null;
+        let skipNextCleanup = false; // Flag to skip cleanup when called from refresh()
 
-        let ws = null;
-        let pc = null;
-        let iceServers = null;
-        let isConnecting = false;
-        let reconnectAttempts = 0;
-        let reconnectTimer = null;
-        let connectionTimer = null;
-        let lastStreamId = '';
-        let wsPingTimer = null;
+        const video = document.getElementById('video'), statusDot = document.getElementById('statusDot'), statusText = document.getElementById('statusText');
+        const iceState = document.getElementById('iceState'), micState = document.getElementById('micState'), overlay = document.getElementById('overlay');
+        const overlayText = document.getElementById('overlayText'), reconnectInfo = document.getElementById('reconnectInfo');
+        const connectBtn = document.getElementById('connectBtn'), disconnectBtn = document.getElementById('disconnectBtn');
+        const refreshBtn = document.getElementById('refreshBtn'), pttBtn = document.getElementById('pttBtn'), micStatus = document.getElementById('micStatus');
 
-        // Audio/microphone
-        let localStream = null;
-        let audioTrack = null;
-        let isTalking = false;
-        let micPermissionGranted = false;
+        function setStatus(s, d) { statusText.textContent = s; statusDot.className = 'dot dot-' + d; }
+        function showOverlay(t) { overlayText.textContent = t; overlay.classList.remove('hidden'); }
+        function hideOverlay() { overlay.classList.add('hidden'); }
 
-        // Playback state
-        let isPlayPending = false;
-        let currentStreamId = null;
-        let skipNextCleanup = false;  // Flag to skip cleanup when called from refresh()
-
-        const video = document.getElementById('video');
-        const statusDot = document.getElementById('statusDot');
-        const statusText = document.getElementById('statusText');
-        const iceState = document.getElementById('iceState');
-        const micState = document.getElementById('micState');
-        const overlay = document.getElementById('overlay');
-        const overlayText = document.getElementById('overlayText');
-        const reconnectInfo = document.getElementById('reconnectInfo');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        const refreshBtn = document.getElementById('refreshBtn');
-        const pttBtn = document.getElementById('pttBtn');
-        const micStatus = document.getElementById('micStatus');
-
-        function setStatus(status, dot) {
-            statusText.textContent = status;
-            statusDot.className = 'dot dot-' + dot;
-        }
-
-        function showOverlay(text) {
-            overlayText.textContent = text;
-            overlay.classList.remove('hidden');
-        }
-
-        function hideOverlay() {
-            overlay.classList.add('hidden');
-        }
-
-        // Check if getUserMedia is supported
-        function isMicSupported() {
-            // Check if getUserMedia API exists
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                return true;
-            }
-            // In some browsers/WebViews, isSecureContext may be false but mic still works
-            // So we'll try anyway and handle errors
-            console.warn('getUserMedia may not be available. isSecureContext:', window.isSecureContext);
-            return false;
-        }
-
-        // Request microphone permission
         async function requestMicPermission() {
-            // First check if API exists
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                console.error('getUserMedia API not available');
-                micPermissionGranted = false;
-                pttBtn.classList.add('no-mic');
-                micState.textContent = 'Not available';
-                return false;
+                console.error('getUserMedia API not available'); micPermissionGranted = false; pttBtn.classList.add('no-mic'); micState.textContent = 'Not available'; return false;
             }
-
             try {
                 console.log('Requesting microphone permission...');
-
-                // Try simple constraints first for maximum compatibility
                 let constraints = { audio: true };
-
-                try {
-                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
-                } catch (simpleErr) {
-                    console.log('Simple audio constraints failed, trying detailed:', simpleErr.message);
-                    // Try with detailed constraints
-                    constraints = {
-                        audio: {
-                            echoCancellation: true,
-                            noiseSuppression: true,
-                            autoGainControl: true
-                        }
-                    };
-                    localStream = await navigator.mediaDevices.getUserMedia(constraints);
-                }
-
+                try { localStream = await navigator.mediaDevices.getUserMedia(constraints); }
+                catch (e) { localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
                 audioTrack = localStream.getAudioTracks()[0];
-                if (audioTrack) {
-                    audioTrack.enabled = false; // Start muted
-                    micPermissionGranted = true;
-                    pttBtn.classList.remove('no-mic', 'disabled');
-                    micState.textContent = 'Ready';
-                    console.log('Microphone permission granted, track:', audioTrack.label);
-                    return true;
-                } else {
-                    throw new Error('No audio track available');
-                }
+                if (audioTrack) { audioTrack.enabled = false; micPermissionGranted = true; pttBtn.classList.remove('no-mic', 'disabled'); micState.textContent = 'Ready'; console.log('Mic granted:', audioTrack.label); return true; }
+                else { throw new Error('No audio track'); }
             } catch (e) {
-                console.error('Microphone error:', e.name, e.message);
-                micPermissionGranted = false;
-                pttBtn.classList.add('no-mic');
-                if (e.name === 'NotAllowedError') {
-                    micState.textContent = 'Denied';
-                } else if (e.name === 'NotFoundError') {
-                    micState.textContent = 'No mic';
-                } else if (e.name === 'NotSupportedError' || e.name === 'TypeError') {
-                    micState.textContent = 'Need HTTPS';
-                } else {
-                    micState.textContent = 'Error';
-                }
-                return false;
+                console.error('Mic error:', e.name, e.message); micPermissionGranted = false; pttBtn.classList.add('no-mic');
+                micState.textContent = e.name === 'NotAllowedError' ? 'Denied' : e.name === 'NotFoundError' ? 'No mic' : 'Error'; return false;
             }
         }
 
-        // Push-to-talk handlers
         async function startTalk(event) {
             if (event) event.preventDefault();
-
-            // If mic not granted, try to request it (needs user gesture)
-            if (!micPermissionGranted) {
-                console.log('PTT: Requesting mic permission on user gesture...');
-                const granted = await requestMicPermission();
-                if (!granted) {
-                    console.log('PTT: Mic permission not granted');
-                    return;
-                }
-                // Re-add track to peer connection if connected
-                if (pc && audioTrack) {
-                    try {
-                        pc.addTrack(audioTrack, localStream);
-                        console.log('PTT: Added audio track to existing connection');
-                    } catch (e) {
-                        console.log('PTT: Track may already be added:', e.message);
-                    }
-                }
-            }
-
-            if (!pc || pc.connectionState !== 'connected' || !audioTrack) {
-                console.log('PTT: Not ready -', !pc ? 'no connection' : !audioTrack ? 'no audio track' : 'state: ' + pc.connectionState);
-                return;
-            }
-
-            isTalking = true;
-            audioTrack.enabled = true;
-            pttBtn.classList.add('active');
-            micStatus.classList.add('active');
-            micState.textContent = 'Talking';
-            console.log('PTT: Started talking');
+            if (!micPermissionGranted) { const granted = await requestMicPermission(); if (!granted) return; if (pc && audioTrack) try { pc.addTrack(audioTrack, localStream); } catch (e) {} }
+            if (!pc || pc.connectionState !== 'connected' || !audioTrack) return;
+            isTalking = true; audioTrack.enabled = true; pttBtn.classList.add('active'); micStatus.classList.add('active'); micState.textContent = 'Talking'; console.log('PTT: Started');
         }
-
-        function stopTalk(event) {
-            if (event) event.preventDefault();
-            if (!audioTrack) return;
-
-            isTalking = false;
-            audioTrack.enabled = false;
-            pttBtn.classList.remove('active');
-            micStatus.classList.remove('active');
-            if (micPermissionGranted) {
-                micState.textContent = 'Ready';
-            }
-            console.log('PTT: Stopped talking');
-        }
+        function stopTalk(event) { if (event) event.preventDefault(); if (!audioTrack) return; isTalking = false; audioTrack.enabled = false; pttBtn.classList.remove('active'); micStatus.classList.remove('active'); if (micPermissionGranted) micState.textContent = 'Ready'; }
 
         async function connect() {
-            if (isConnecting) {
-                console.log('Connect: Already connecting, ignoring');
-                return;
-            }
-
-            const streamId = document.getElementById('streamId').value.trim();
-            if (!streamId) { alert('Enter stream ID'); return; }
-
-            lastStreamId = streamId;
-            isConnecting = true;
-            reconnectInfo.textContent = '';
+            if (isConnecting) { console.log('Connect: Already connecting, ignoring'); return; }
+            const streamId = document.getElementById('streamId').value.trim(); if (!streamId) { alert('Enter stream ID'); return; }
+            lastStreamId = streamId; isConnecting = true; reconnectInfo.textContent = '';
 
             // Only cleanup if not already done by refresh()
-            if (skipNextCleanup) {
-                skipNextCleanup = false;
-                console.log('Connect: Skipping cleanup (already done by refresh)');
-            } else {
-                await cleanup();
-            }
+            if (skipNextCleanup) { skipNextCleanup = false; console.log('Connect: Skipping cleanup (already done by refresh)'); }
+            else { await cleanup(); }
 
-            // Request mic permission if not already granted
-            if (!micPermissionGranted) {
-                await requestMicPermission();
-            }
-
-            setStatus('Connecting...', 'yellow');
-            showOverlay('Connecting...');
-            connectBtn.disabled = true;
-            disconnectBtn.disabled = true;
-            refreshBtn.disabled = true;
-            pttBtn.classList.add('disabled');
-
-            // Fetch TURN credentials
-            try {
-                const res = await fetch('/turn-credentials');
-                if (res.ok) {
-                    const data = await res.json();
-                    iceServers = data.iceServers;
-                }
-            } catch (e) {
-                iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-            }
-
-            // Connect WebSocket
+            if (!micPermissionGranted) await requestMicPermission();
+            setStatus('Connecting...', 'yellow'); showOverlay('Connecting...'); connectBtn.disabled = true; disconnectBtn.disabled = true; refreshBtn.disabled = true; pttBtn.classList.add('disabled');
+            try { const res = await fetch('/turn-credentials'); if (res.ok) iceServers = (await res.json()).iceServers; } catch (e) { iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; }
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${protocol}//${location.host}`);
-
-            connectionTimer = setTimeout(() => {
-                if (isConnecting) {
-                    console.log('Connection timeout');
-                    handleConnectionFailure('Connection timeout');
-                }
-            }, CONNECTION_TIMEOUT);
-
-            ws.onopen = () => {
-                console.log('WebSocket connected');
-                ws.send(JSON.stringify({ type: 'join', stream_id: streamId }));
-
-                // Start WebSocket keep-alive ping
-                clearInterval(wsPingTimer);
-                wsPingTimer = setInterval(() => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'ping' }));
-                    }
-                }, WS_PING_INTERVAL);
-            };
-
+            connectionTimer = setTimeout(() => { if (isConnecting) handleConnectionFailure('Connection timeout'); }, CONNECTION_TIMEOUT);
+            ws.onopen = () => { console.log('WebSocket connected'); ws.send(JSON.stringify({ type: 'join', stream_id: streamId })); clearInterval(wsPingTimer); wsPingTimer = setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, WS_PING_INTERVAL); };
             ws.onmessage = async (e) => {
                 const data = JSON.parse(e.data);
-
-                switch(data.type) {
-                    case 'joined':
-                        showOverlay('Waiting for stream...');
-                        break;
-                    case 'offer':
-                        await handleOffer(data.sdp, data.from);
-                        break;
-                    case 'ice-candidate':
-                        if (pc && data.candidate) {
-                            try {
-                                await pc.addIceCandidate({
-                                    candidate: data.candidate,
-                                    sdpMLineIndex: data.sdpMLineIndex
-                                });
-                            } catch (e) {}
-                        }
-                        break;
-                    case 'broadcaster-left':
-                        handleConnectionFailure('Stream ended');
-                        break;
-                    case 'error':
-                        handleConnectionFailure(data.message || 'Error');
-                        break;
-                }
+                if (data.type === 'joined') showOverlay('Waiting for stream...');
+                else if (data.type === 'offer') await handleOffer(data.sdp, data.from);
+                else if (data.type === 'ice-candidate' && pc && data.candidate) try { await pc.addIceCandidate({ candidate: data.candidate, sdpMLineIndex: data.sdpMLineIndex }); } catch (e) {}
+                else if (data.type === 'broadcaster-left') handleConnectionFailure('Stream ended');
+                else if (data.type === 'error') handleConnectionFailure(data.message || 'Error');
             };
-
-            ws.onerror = (e) => {
-                console.log('WebSocket error:', e);
-                handleConnectionFailure('Connection error');
-            };
-            ws.onclose = (e) => {
-                console.log('WebSocket closed, code:', e.code, 'reason:', e.reason, 'isConnecting:', isConnecting);
-                if (isConnecting || statusText.textContent === 'Connected') {
-                    handleConnectionFailure('Connection lost');
-                }
-            };
+            ws.onerror = () => handleConnectionFailure('Connection error');
+            ws.onclose = () => { if (isConnecting || statusText.textContent === 'Connected') handleConnectionFailure('Connection lost'); };
         }
 
         async function handleOffer(sdp, streamId) {
-            pc = new RTCPeerConnection({
-                iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
-
-            // Add local audio track for push-to-talk (if mic permission granted)
-            if (audioTrack) {
-                console.log('Adding local audio track for PTT');
-                pc.addTrack(audioTrack, localStream);
-            }
-
+            pc = new RTCPeerConnection({ iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }] });
+            if (audioTrack) { console.log('Adding audio track'); pc.addTrack(audioTrack, localStream); }
             pc.ontrack = (e) => {
                 console.log('Track received:', e.track.kind, 'streams:', e.streams.length);
-
                 if (e.streams && e.streams[0]) {
                     const stream = e.streams[0];
+                    if (video.srcObject !== stream) { console.log('Setting video srcObject (new stream)'); video.srcObject = stream; currentStreamId = stream.id; }
+                    else { console.log('Same stream, skipping srcObject assignment'); }
 
-                    // Only set srcObject if it's a different stream
-                    if (video.srcObject !== stream) {
-                        console.log('Setting video srcObject (new stream)');
-                        video.srcObject = stream;
-                        currentStreamId = stream.id;
-                    } else {
-                        console.log('Same stream, skipping srcObject assignment');
-                    }
-
-                    // Only attempt play if not already pending and video is paused
                     if (!isPlayPending && video.paused) {
                         isPlayPending = true;
-                        // Force play after a short delay
                         setTimeout(() => {
-                            // Double-check we still have the same stream and pc is valid
-                            if (!pc || video.srcObject !== stream) {
-                                console.log('Play cancelled: stream changed or connection lost');
-                                isPlayPending = false;
-                                return;
-                            }
-                            console.log('Attempting to play video, paused:', video.paused, 'readyState:', video.readyState);
-                            video.play()
-                                .then(() => {
-                                    console.log('Video playing successfully');
-                                    isPlayPending = false;
-                                })
-                                .catch(err => {
-                                    console.log('Play error:', err.name, '- trying muted');
-                                    video.muted = true;
-                                    video.play()
-                                        .then(() => {
-                                            console.log('Muted video playing');
-                                            isPlayPending = false;
-                                        })
-                                        .catch(e2 => {
-                                            console.error('Muted play failed:', e2);
-                                            isPlayPending = false;
-                                        });
-                                });
+                            if (!pc || video.srcObject !== stream) { console.log('Play cancelled: stream changed'); isPlayPending = false; return; }
+                            console.log('Attempting play, paused:', video.paused, 'readyState:', video.readyState);
+                            video.play().then(() => { console.log('Video playing'); isPlayPending = false; }).catch(err => { console.log('Play error:', err.name); video.muted = true; video.play().then(() => { console.log('Muted video playing'); isPlayPending = false; }).catch(e2 => { console.error('Muted play failed:', e2); isPlayPending = false; }); });
                         }, 100);
-                    } else {
-                        console.log('Play already pending or video not paused, skipping play attempt');
                     }
-
-                    if (e.track.kind === 'video') {
-                        clearTimeout(connectionTimer);
-                        isConnecting = false;
-                        reconnectAttempts = 0;
-                        setStatus('Connected', 'green');
-                        hideOverlay();
-                        disconnectBtn.disabled = false;
-                        refreshBtn.disabled = false;
-                        if (micPermissionGranted) pttBtn.classList.remove('disabled');
-                        reconnectInfo.textContent = '';
-                    }
-                } else {
-                    console.warn('No streams in track event');
-                }
+                    if (e.track.kind === 'video') { clearTimeout(connectionTimer); isConnecting = false; reconnectAttempts = 0; setStatus('Connected', 'green'); hideOverlay(); disconnectBtn.disabled = false; refreshBtn.disabled = false; if (micPermissionGranted) pttBtn.classList.remove('disabled'); reconnectInfo.textContent = ''; }
+                } else { console.warn('No streams in track event'); }
             };
-
-            pc.oniceconnectionstatechange = () => {
-                iceState.textContent = pc.iceConnectionState;
-                console.log('ICE state:', pc.iceConnectionState);
-
-                if (pc.iceConnectionState === 'failed') {
-                    handleConnectionFailure('ICE failed');
-                } else if (pc.iceConnectionState === 'disconnected') {
-                    // ICE disconnected can recover, wait a bit before failing
-                    console.log('ICE disconnected - waiting for recovery...');
-                    setTimeout(() => {
-                        if (pc && pc.iceConnectionState === 'disconnected') {
-                            handleConnectionFailure('ICE disconnected');
-                        }
-                    }, 5000);
-                } else if (pc.iceConnectionState === 'connected') {
-                    console.log('ICE connected successfully');
-                }
-            };
-
-            pc.onicecandidate = (e) => {
-                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'ice-candidate',
-                        to: streamId,
-                        candidate: e.candidate.candidate,
-                        sdpMLineIndex: e.candidate.sdpMLineIndex
-                    }));
-                }
-            };
-
-            await pc.setRemoteDescription({ type: 'offer', sdp });
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-
-            ws.send(JSON.stringify({
-                type: 'answer',
-                to: streamId,
-                sdp: answer.sdp
-            }));
+            pc.oniceconnectionstatechange = () => { iceState.textContent = pc.iceConnectionState; console.log('ICE:', pc.iceConnectionState); if (pc.iceConnectionState === 'failed') handleConnectionFailure('ICE failed'); else if (pc.iceConnectionState === 'disconnected') setTimeout(() => { if (pc && pc.iceConnectionState === 'disconnected') handleConnectionFailure('ICE disconnected'); }, 5000); };
+            pc.onicecandidate = (e) => { if (e.candidate && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ice-candidate', to: streamId, candidate: e.candidate.candidate, sdpMLineIndex: e.candidate.sdpMLineIndex })); };
+            await pc.setRemoteDescription({ type: 'offer', sdp }); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type: 'answer', to: streamId, sdp: answer.sdp }));
         }
 
         function handleConnectionFailure(reason) {
-            clearTimeout(connectionTimer);
-            isConnecting = false;
-
-            setStatus('Disconnected', 'red');
-            showOverlay(reason);
-            iceState.textContent = '-';
-            pttBtn.classList.add('disabled');
-            stopTalk();
-
-            cleanup(true); // Keep mic stream
-
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = true;
-            refreshBtn.disabled = true;
+            clearTimeout(connectionTimer); isConnecting = false; setStatus('Disconnected', 'red'); showOverlay(reason); iceState.textContent = '-'; pttBtn.classList.add('disabled'); stopTalk(); cleanup(true);
+            connectBtn.disabled = false; disconnectBtn.disabled = true; refreshBtn.disabled = true;
 
             // Don't auto-reconnect if a manual refresh is in progress
-            if (skipNextCleanup) {
-                console.log('handleConnectionFailure: Manual refresh in progress, skipping auto-reconnect');
-                return;
-            }
+            if (skipNextCleanup) { console.log('handleConnectionFailure: Manual refresh in progress, skipping auto-reconnect'); return; }
 
-            if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                reconnectAttempts++;
-                // Quick retry for first few attempts, then slow down
-                const delay = reconnectAttempts <= 3 ? RECONNECT_DELAY : Math.min(RECONNECT_DELAY * Math.floor(reconnectAttempts / 3), 15000);
-                reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`;
-                showOverlay(`${reason} - Reconnecting...`);
-
-                reconnectTimer = setTimeout(() => {
-                    document.getElementById('streamId').value = lastStreamId;
-                    connect();
-                }, delay);
-            }
+            if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) { reconnectAttempts++; const delay = reconnectAttempts <= 3 ? RECONNECT_DELAY : Math.min(RECONNECT_DELAY * Math.floor(reconnectAttempts / 3), 15000); reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`; showOverlay(`${reason} - Reconnecting...`); reconnectTimer = setTimeout(() => { document.getElementById('streamId').value = lastStreamId; connect(); }, delay); }
         }
 
         async function cleanup(keepMic = false) {
-            console.log('Cleanup: Starting cleanup, keepMic:', keepMic);
-            clearTimeout(reconnectTimer);
-            clearTimeout(connectionTimer);
-            clearInterval(wsPingTimer);
-            reconnectTimer = null;
-            connectionTimer = null;
-            wsPingTimer = null;
-
-            if (pc) {
-                pc.ontrack = null;
-                pc.onicecandidate = null;
-                pc.oniceconnectionstatechange = null;
-                pc.close();
-                pc = null;
-            }
-            if (ws) {
-                ws.onopen = null;
-                ws.onmessage = null;
-                ws.onerror = null;
-                ws.onclose = null;
-                if (ws.readyState === WebSocket.OPEN) ws.close();
-                ws = null;
-            }
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(t => t.stop());
-                video.srcObject = null;
-            }
-            isPlayPending = false;
-            currentStreamId = null;
-
-            // Only cleanup mic if explicitly requested
-            if (!keepMic && localStream) {
-                localStream.getTracks().forEach(t => t.stop());
-                localStream = null;
-                audioTrack = null;
-                micPermissionGranted = false;
-                pttBtn.classList.add('no-mic', 'disabled');
-                micState.textContent = 'Off';
-            }
+            console.log('Cleanup: Starting, keepMic:', keepMic);
+            clearTimeout(reconnectTimer); clearTimeout(connectionTimer); clearInterval(wsPingTimer);
+            reconnectTimer = null; connectionTimer = null; wsPingTimer = null;
+            if (pc) { pc.ontrack = null; pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.close(); pc = null; }
+            if (ws) { ws.onopen = null; ws.onmessage = null; ws.onerror = null; ws.onclose = null; if (ws.readyState === WebSocket.OPEN) ws.close(); ws = null; }
+            if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+            isPlayPending = false; currentStreamId = null;
+            if (!keepMic && localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; audioTrack = null; micPermissionGranted = false; pttBtn.classList.add('no-mic', 'disabled'); micState.textContent = 'Off'; }
         }
 
-        async function disconnect() {
-            reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
-            lastStreamId = '';
-            await cleanup(false); // Full cleanup including mic
-
-            setStatus('Disconnected', 'red');
-            hideOverlay();
-            iceState.textContent = '-';
-            reconnectInfo.textContent = '';
-
-            connectBtn.disabled = false;
-            disconnectBtn.disabled = true;
-            refreshBtn.disabled = true;
-            pttBtn.classList.add('disabled');
-        }
+        async function disconnect() { reconnectAttempts = MAX_RECONNECT_ATTEMPTS; lastStreamId = ''; await cleanup(false); setStatus('Disconnected', 'red'); hideOverlay(); iceState.textContent = '-'; reconnectInfo.textContent = ''; connectBtn.disabled = false; disconnectBtn.disabled = true; refreshBtn.disabled = true; pttBtn.classList.add('disabled'); }
 
         async function refresh() {
             console.log('Refresh: Starting refresh');
-
-            // Cancel any pending auto-reconnect
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-
+            clearTimeout(reconnectTimer); reconnectTimer = null;
             reconnectAttempts = 0;
-            isConnecting = false;  // Reset in case previous connect was stuck
-
+            isConnecting = false; // Reset in case previous connect was stuck
             await cleanup(true); // Keep mic
-
-            // Set flag so connect() doesn't cleanup again
-            skipNextCleanup = true;
-
-            // Give server more time to process the disconnect
-            // before we try to reconnect
+            skipNextCleanup = true; // Set flag so connect() doesn't cleanup again
             showOverlay('Reconnecting...');
-            setTimeout(() => {
-                if (skipNextCleanup) {  // Only connect if not cancelled
-                    connect();
-                }
-            }, 500);  // Increased from 100ms to 500ms
+            setTimeout(() => { if (skipNextCleanup) connect(); }, 500); // Increased delay for server to process
         }
 
-        function checkAndReconnect() {
-            if (statusText.textContent !== 'Connected' && lastStreamId) {
-                reconnectAttempts = 0;
-                connect();
-            }
-        }
-
-        function toggleFullscreen() {
-            if (document.fullscreenElement) {
-                document.exitFullscreen();
-            } else {
-                document.querySelector('.video-container').requestFullscreen();
-            }
-        }
+        function toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen(); else document.querySelector('.video-container').requestFullscreen(); }
 
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && statusText.textContent !== 'Connected' && lastStreamId) {
-                // Don't interfere if a manual refresh is in progress
-                if (skipNextCleanup) {
-                    console.log('Visibility: Skipping auto-reconnect, refresh in progress');
-                    return;
-                }
+                if (skipNextCleanup) { console.log('Visibility: Skipping auto-reconnect, refresh in progress'); return; }
                 console.log('Visibility: Page visible, attempting reconnect');
-                reconnectAttempts = 0;
-                setTimeout(connect, 500);
+                reconnectAttempts = 0; setTimeout(connect, 500);
             }
         });
 
-        // Prevent zoom on double-tap (but allow buttons to work)
-        let lastTouchEnd = 0;
-        document.addEventListener('touchend', (e) => {
-            const now = Date.now();
-            if (now - lastTouchEnd <= 300) {
-                // Double tap detected - prevent zoom only on video area
-                if (e.target.closest('.video-container') && !e.target.closest('button')) {
-                    e.preventDefault();
-                }
-            }
-            lastTouchEnd = now;
-        }, { passive: false });
-
-        // Debug video events
-        video.addEventListener('canplay', () => console.log('Video canplay event'));
-        video.addEventListener('playing', () => console.log('Video playing event'));
-        video.addEventListener('error', (e) => console.error('Video error:', e));
-        video.addEventListener('loadedmetadata', () => console.log('Video metadata loaded, size:', video.videoWidth, 'x', video.videoHeight));
-
+        let lastTouchEnd = 0; document.addEventListener('touchend', (e) => { const now = Date.now(); if (now - lastTouchEnd <= 300 && e.target.closest('.video-container') && !e.target.closest('button')) e.preventDefault(); lastTouchEnd = now; }, { passive: false });
+        video.addEventListener('canplay', () => console.log('Video canplay')); video.addEventListener('playing', () => console.log('Video playing')); video.addEventListener('error', (e) => console.error('Video error:', e)); video.addEventListener('loadedmetadata', () => console.log('Video metadata:', video.videoWidth, 'x', video.videoHeight));
         console.log('Viewer ready - Auto-reconnect enabled');
     </script>
 </body>
