@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 class WebViewerScreen extends StatefulWidget {
@@ -41,14 +43,26 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
   }
 
   Future<void> _requestMicPermission() async {
-    final status = await Permission.microphone.request();
+    debugPrint('[WebView] Requesting microphone permission...');
+
+    // Request both microphone and camera permissions
+    // Some WebViews require both for getUserMedia to work properly
+    final micStatus = await Permission.microphone.request();
+    final cameraStatus = await Permission.camera.request();
+
+    debugPrint('[WebView] Microphone status: $micStatus');
+    debugPrint('[WebView] Camera status: $cameraStatus');
+
     setState(() {
-      _micPermissionGranted = status.isGranted;
+      _micPermissionGranted = micStatus.isGranted;
     });
-    if (status.isGranted) {
-      debugPrint('[WebView] Microphone permission granted');
-    } else {
-      debugPrint('[WebView] Microphone permission denied');
+
+    if (micStatus.isGranted) {
+      debugPrint('[WebView] Microphone permission GRANTED');
+    } else if (micStatus.isDenied) {
+      debugPrint('[WebView] Microphone permission DENIED');
+    } else if (micStatus.isPermanentlyDenied) {
+      debugPrint('[WebView] Microphone permission PERMANENTLY DENIED - user must enable in settings');
     }
   }
 
@@ -62,7 +76,20 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
   }
 
   void _initWebView(String url) {
-    final controller = WebViewController();
+    late final PlatformWebViewControllerCreationParams params;
+
+    // Platform-specific WebView parameters
+    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
+      // iOS/macOS - WKWebView
+      params = WebKitWebViewControllerCreationParams(
+        allowsInlineMediaPlayback: true,
+        mediaTypesRequiringUserAction: const <PlaybackMediaTypes>{},
+      );
+    } else {
+      params = const PlatformWebViewControllerCreationParams();
+    }
+
+    final controller = WebViewController.fromPlatformCreationParams(params);
 
     // Configure the controller
     controller
@@ -76,17 +103,21 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
             });
           },
           onPageStarted: (String url) {
+            debugPrint('[WebView] Page started: $url');
             setState(() {
               _isLoading = true;
             });
           },
           onPageFinished: (String url) {
+            debugPrint('[WebView] Page finished: $url');
             setState(() {
               _isLoading = false;
               _hasLoadedUrl = true;
             });
-            // Enable hardware acceleration for video
+            // Inject mic permission status and enable video playsinline
             _controller?.runJavaScript('''
+              console.log('[Flutter] Page loaded, mic permission: $_micPermissionGranted');
+              window.flutterMicGranted = $_micPermissionGranted;
               document.querySelectorAll('video').forEach(v => {
                 v.setAttribute('playsinline', '');
                 v.setAttribute('webkit-playsinline', '');
@@ -105,44 +136,89 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
             }
           },
         ),
-      )
-      ..loadRequest(Uri.parse(url));
+      );
 
-    // Enable hardware acceleration and microphone on Android
+    // Platform-specific configuration
     if (controller.platform is AndroidWebViewController) {
-      final androidController = controller.platform as AndroidWebViewController;
-      androidController.setMediaPlaybackRequiresUserGesture(false);
-
-      // Handle permission requests from JavaScript (microphone, camera)
-      androidController.setOnPlatformPermissionRequest((request) async {
-        debugPrint('[WebView] Permission request: ${request.types}');
-
-        // Check if microphone permission is requested
-        if (request.types.contains(WebViewPermissionResourceType.microphone)) {
-          if (_micPermissionGranted) {
-            debugPrint('[WebView] Granting microphone permission to WebView');
-            request.grant();
-          } else {
-            // Try to request permission again
-            final status = await Permission.microphone.request();
-            if (status.isGranted) {
-              setState(() => _micPermissionGranted = true);
-              request.grant();
-            } else {
-              request.deny();
-            }
-          }
-        } else {
-          // Grant other permissions (like camera if needed)
-          request.grant();
-        }
-      });
+      _configureAndroidWebView(controller.platform as AndroidWebViewController);
+    } else if (controller.platform is WebKitWebViewController) {
+      _configureIOSWebView(controller.platform as WebKitWebViewController);
     }
+
+    // Load the URL
+    controller.loadRequest(Uri.parse(url));
 
     _controller = controller;
     setState(() {
       _hasLoadedUrl = true;
     });
+  }
+
+  void _configureAndroidWebView(AndroidWebViewController androidController) {
+    debugPrint('[WebView] Configuring Android WebView for media permissions');
+
+    // Allow media playback without user gesture (required for autoplay)
+    androidController.setMediaPlaybackRequiresUserGesture(false);
+
+    // Handle permission requests from JavaScript (microphone, camera)
+    androidController.setOnPlatformPermissionRequest((request) async {
+      debugPrint('[WebView] Permission request from JS: ${request.types}');
+
+      bool hasMic = request.types.contains(WebViewPermissionResourceType.microphone);
+      bool hasCamera = request.types.contains(WebViewPermissionResourceType.camera);
+
+      debugPrint('[WebView] Requested - Mic: $hasMic, Camera: $hasCamera');
+      debugPrint('[WebView] Current app mic permission: $_micPermissionGranted');
+
+      // Handle microphone permission
+      if (hasMic) {
+        if (_micPermissionGranted) {
+          debugPrint('[WebView] GRANTING microphone permission to WebView (already granted to app)');
+          request.grant();
+        } else {
+          // Try to request permission again from the system
+          debugPrint('[WebView] Requesting mic permission from system...');
+          final status = await Permission.microphone.request();
+          debugPrint('[WebView] System mic permission result: $status');
+
+          if (status.isGranted) {
+            setState(() => _micPermissionGranted = true);
+            debugPrint('[WebView] GRANTING microphone permission to WebView (just granted)');
+            request.grant();
+          } else {
+            debugPrint('[WebView] DENYING microphone permission to WebView');
+            request.deny();
+
+            // Show a snackbar to inform user
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('Microphone permission required for talk feature'),
+                  action: SnackBarAction(
+                    label: 'Settings',
+                    onPressed: () => openAppSettings(),
+                  ),
+                ),
+              );
+            }
+          }
+        }
+      } else if (hasCamera) {
+        // Grant camera permission if requested
+        debugPrint('[WebView] GRANTING camera permission');
+        request.grant();
+      } else {
+        // Grant other permissions
+        debugPrint('[WebView] GRANTING other permission: ${request.types}');
+        request.grant();
+      }
+    });
+  }
+
+  void _configureIOSWebView(WebKitWebViewController iosController) {
+    debugPrint('[WebView] Configuring iOS WebView for media permissions');
+    // iOS WebView is configured via creation params above
+    // Additional iOS-specific settings can be added here if needed
   }
 
   void _loadUrl() {

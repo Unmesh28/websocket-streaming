@@ -23,6 +23,8 @@ dependencies:
 
   # WebView for embedded web viewer
   webview_flutter: ^4.4.2
+  webview_flutter_android: ^3.12.0
+  webview_flutter_wkwebview: ^3.9.0
 
   # Permission handling (microphone for push-to-talk)
   permission_handler: ^11.1.0
