@@ -554,11 +554,13 @@
 
                     // Only set srcObject for video track to avoid audio stream overwriting video
                     if (e.track.kind === 'video') {
-                        if (video.srcObject !== stream) {
-                            console.log('[TRACK] Setting video srcObject');
-                            video.srcObject = stream;
-                            currentMediaStreamId = stream.id;
-                        }
+                        console.log('[TRACK] Video track state:', e.track.readyState, 'muted:', e.track.muted, 'enabled:', e.track.enabled);
+                        console.log('[TRACK] Stream has', stream.getTracks().length, 'tracks');
+
+                        // Always set srcObject for video track
+                        console.log('[TRACK] Setting video srcObject, video.paused:', video.paused, 'isPlayPending:', isPlayPending);
+                        video.srcObject = stream;
+                        currentMediaStreamId = stream.id;
                     } else if (e.track.kind === 'audio' && video.srcObject) {
                         // Audio track arrived - add it to existing stream if needed
                         console.log('[TRACK] Audio track received, video srcObject already set');
@@ -566,10 +568,13 @@
 
                     // Mark connected and start playback when video track arrives
                     if (e.track.kind === 'video') {
-                        // Try to play video
-                        if (!isPlayPending && video.paused) {
+                        console.log('[PLAY] Checking play conditions: isPlayPending=', isPlayPending, 'video.paused=', video.paused);
+
+                        // Try to play video - always attempt on video track
+                        if (!isPlayPending) {
                             isPlayPending = true;
                             const videoStream = video.srcObject;
+                            console.log('[PLAY] Scheduling play attempt');
                             setTimeout(() => {
                                 if (!pc || video.srcObject !== videoStream) {
                                     console.log('[PLAY] Cancelled, stream changed');
