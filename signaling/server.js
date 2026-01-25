@@ -43,7 +43,9 @@ function generateTurnCredentials() {
 // Try multiple paths to handle different deployment scenarios
 const fs = require('fs');
 const possibleWebPaths = [
-    path.join(__dirname, '../web'),           // Relative to script
+    path.join(__dirname, 'public'),           // public folder next to server.js
+    path.join(process.cwd(), 'public'),       // public in cwd
+    path.join(__dirname, '../web'),           // Relative to script (dev)
     path.join(process.cwd(), '../web'),       // Relative to cwd (signaling dir)
     path.join(process.cwd(), 'web'),          // Relative to cwd (project root)
     '/home/user/websocket-streaming/web'      // Absolute fallback
