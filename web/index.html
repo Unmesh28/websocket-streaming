@@ -552,45 +552,52 @@
                 if (e.streams && e.streams[0]) {
                     const stream = e.streams[0];
 
-                    if (video.srcObject !== stream) {
-                        console.log('[TRACK] Setting video srcObject');
-                        video.srcObject = stream;
-                        currentMediaStreamId = stream.id;
-                    }
-
-                    // Try to play video
-                    if (!isPlayPending && video.paused) {
-                        isPlayPending = true;
-                        setTimeout(() => {
-                            if (!pc || video.srcObject !== stream) {
-                                console.log('[PLAY] Cancelled, stream changed');
-                                isPlayPending = false;
-                                return;
-                            }
-
-                            video.play()
-                                .then(() => {
-                                    console.log('[PLAY] Video playing');
-                                    isPlayPending = false;
-                                })
-                                .catch(err => {
-                                    console.log('[PLAY] Error:', err.name, '- trying muted');
-                                    video.muted = true;
-                                    video.play()
-                                        .then(() => {
-                                            console.log('[PLAY] Muted video playing');
-                                            isPlayPending = false;
-                                        })
-                                        .catch(e2 => {
-                                            console.error('[PLAY] Muted play failed:', e2);
-                                            isPlayPending = false;
-                                        });
-                                });
-                        }, 100);
-                    }
-
-                    // Mark connected when video track arrives
+                    // Only set srcObject for video track to avoid audio stream overwriting video
                     if (e.track.kind === 'video') {
+                        if (video.srcObject !== stream) {
+                            console.log('[TRACK] Setting video srcObject');
+                            video.srcObject = stream;
+                            currentMediaStreamId = stream.id;
+                        }
+                    } else if (e.track.kind === 'audio' && video.srcObject) {
+                        // Audio track arrived - add it to existing stream if needed
+                        console.log('[TRACK] Audio track received, video srcObject already set');
+                    }
+
+                    // Mark connected and start playback when video track arrives
+                    if (e.track.kind === 'video') {
+                        // Try to play video
+                        if (!isPlayPending && video.paused) {
+                            isPlayPending = true;
+                            const videoStream = video.srcObject;
+                            setTimeout(() => {
+                                if (!pc || video.srcObject !== videoStream) {
+                                    console.log('[PLAY] Cancelled, stream changed');
+                                    isPlayPending = false;
+                                    return;
+                                }
+
+                                video.play()
+                                    .then(() => {
+                                        console.log('[PLAY] Video playing');
+                                        isPlayPending = false;
+                                    })
+                                    .catch(err => {
+                                        console.log('[PLAY] Error:', err.name, '- trying muted');
+                                        video.muted = true;
+                                        video.play()
+                                            .then(() => {
+                                                console.log('[PLAY] Muted video playing');
+                                                isPlayPending = false;
+                                            })
+                                            .catch(e2 => {
+                                                console.error('[PLAY] Muted play failed:', e2);
+                                                isPlayPending = false;
+                                            });
+                                    });
+                            }, 100);
+                        }
+
                         clearTimeout(connectionTimer);
                         connectionTimer = null;
                         reconnectAttempts = 0;
