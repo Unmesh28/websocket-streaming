@@ -337,6 +337,15 @@ WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
         return it->second;
     }
 
+    // CRITICAL FIX for libnice crash:
+    // When there are existing viewers, their ICE operations may still be in progress
+    // or libnice may have internal state that conflicts with new peer creation.
+    // Adding a stabilization delay prevents libnice assertion failures.
+    if (!viewers_.empty()) {
+        LOG("SHARED", "Existing viewers detected - adding 500ms stabilization delay for: " << viewer_id);
+        g_usleep(500000);  // 500ms delay before adding new viewer when others exist
+    }
+
     // Log current tee state for debugging
     if (video_tee_) {
         GstState tee_state;
@@ -417,6 +426,9 @@ static GstPadProbeReturn webrtc_buffer_probe(GstPad* pad, GstPadProbeInfo* info,
 
 // Static TURN configuration
 WebRTCPeer::TurnConfig WebRTCPeer::turn_config_;
+
+// Static ICE operation timestamp to prevent rapid concurrent operations
+std::chrono::steady_clock::time_point WebRTCPeer::last_ice_operation_time_ = std::chrono::steady_clock::now();
 bool WebRTCPeer::turn_configured_ = false;
 bool WebRTCPeer::use_cloudflare_turn_ = false;
 
@@ -1295,8 +1307,14 @@ void WebRTCPeer::setRemoteAnswer(const std::string& sdp) {
             LOG("PEER-WARN", "Remote description set with result: " << result << " for: " << viewer_id_);
         }
 
-        // Give libnice time to process the SDP before we start adding ICE candidates
-        g_usleep(50000);  // 50ms delay after setting remote description
+        // Give libnice extended time to process the SDP before we start adding ICE candidates
+        // This allows the internal ICE state machine to stabilize
+        // Increased from 50ms to 150ms to prevent assertion failures
+        LOG("PEER", "Waiting 150ms for libnice to process SDP for: " << viewer_id_);
+        g_usleep(150000);  // 150ms delay after setting remote description
+
+        // Update last ICE operation time
+        last_ice_operation_time_ = std::chrono::steady_clock::now();
     }
 
     gst_webrtc_session_description_free(answer);
@@ -1329,13 +1347,38 @@ void WebRTCPeer::addIceCandidate(const std::string& candidate, int sdp_mline_ind
     {
         std::lock_guard<std::mutex> global_lock(global_ice_mutex_);
 
+        // Check ICE connection state - skip adding candidates if already connected/completed
+        // Adding more candidates after connection is established can trigger libnice race conditions
+        guint ice_state;
+        g_object_get(webrtcbin_, "ice-connection-state", &ice_state, nullptr);
+        if (ice_state >= 2) { // 2=connected, 3=completed, 4=failed, 5=disconnected, 6=closed
+            LOG("ICE-SKIP", "Skipping ICE candidate for " << viewer_id_
+                << " - ICE already in state " << ice_state << " (connected or later)");
+            return;
+        }
+
+        // Wait for cooldown period since last ICE operation
+        // This prevents libnice from getting overwhelmed with rapid ICE operations
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_ice_operation_time_).count();
+        if (elapsed < ICE_OPERATION_COOLDOWN_MS) {
+            int wait_time = ICE_OPERATION_COOLDOWN_MS - elapsed;
+            LOG("ICE-THROTTLE", "Waiting " << wait_time << "ms for ICE cooldown for " << viewer_id_);
+            g_usleep(wait_time * 1000);
+        }
+
         // Remote description is set, add candidate directly
         LOG("PEER", "Adding ICE candidate for " << viewer_id_ << ", mlineindex: " << sdp_mline_index);
         g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", sdp_mline_index, candidate.c_str());
 
-        // Small delay to allow libnice to process this candidate before next one
+        // Update last operation time
+        last_ice_operation_time_ = std::chrono::steady_clock::now();
+
+        // Extended delay to allow libnice to process this candidate before next one
         // This prevents race conditions in libnice's connectivity check state machine
-        g_usleep(5000);  // 5ms between candidates
+        // Increased from 5ms to 30ms to prevent assertion failures
+        g_usleep(30000);  // 30ms between candidates
     }
 }
 
@@ -1353,16 +1396,30 @@ void WebRTCPeer::processQueuedIceCandidates() {
     // This prevents libnice internal state machine crashes
     std::lock_guard<std::mutex> global_lock(global_ice_mutex_);
 
-    // Process candidates with a small delay between each to avoid overwhelming libnice
+    // Wait for cooldown period since last ICE operation before processing batch
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - last_ice_operation_time_).count();
+    if (elapsed < ICE_OPERATION_COOLDOWN_MS) {
+        int wait_time = ICE_OPERATION_COOLDOWN_MS - elapsed;
+        LOG("ICE-THROTTLE", "Waiting " << wait_time << "ms before processing queued candidates for " << viewer_id_);
+        g_usleep(wait_time * 1000);
+    }
+
+    // Process candidates with extended delay between each to avoid overwhelming libnice
     for (size_t i = 0; i < queued_ice_candidates_.size(); i++) {
         const auto& ice = queued_ice_candidates_[i];
         LOG("PEER", "Adding queued ICE candidate " << (i+1) << "/" << queued_ice_candidates_.size()
             << " for " << viewer_id_ << ", mlineindex: " << ice.sdp_mline_index);
         g_signal_emit_by_name(webrtcbin_, "add-ice-candidate", ice.sdp_mline_index, ice.candidate.c_str());
 
-        // Small delay between candidates to allow libnice to process each one
+        // Update last operation time after each candidate
+        last_ice_operation_time_ = std::chrono::steady_clock::now();
+
+        // Extended delay between candidates to allow libnice to process each one
         // This is critical for preventing race conditions in connectivity checks
-        g_usleep(10000);  // 10ms between queued candidates
+        // Increased from 10ms to 50ms to prevent assertion failures
+        g_usleep(50000);  // 50ms between queued candidates
     }
 
     LOG("PEER", "Finished processing queued ICE candidates for " << viewer_id_);
