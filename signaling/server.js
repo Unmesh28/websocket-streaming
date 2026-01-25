@@ -40,7 +40,13 @@ function generateTurnCredentials() {
 }
 
 // Serve static files (HTML viewer)
-app.use(express.static(path.join(__dirname, '../web')));
+const webPath = path.join(__dirname, '../web');
+app.use(express.static(webPath));
+
+// Explicit route handler for root path (fallback for 404 issues)
+app.get('/', (req, res) => {
+    res.sendFile(path.join(webPath, 'index.html'));
+});
 
 // ============================================================================
 // DATA STRUCTURES
