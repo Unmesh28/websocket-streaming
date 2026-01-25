@@ -40,12 +40,35 @@ function generateTurnCredentials() {
 }
 
 // Serve static files (HTML viewer)
-const webPath = path.join(__dirname, '../web');
+// Try multiple paths to handle different deployment scenarios
+const fs = require('fs');
+const possibleWebPaths = [
+    path.join(__dirname, '../web'),           // Relative to script
+    path.join(process.cwd(), '../web'),       // Relative to cwd (signaling dir)
+    path.join(process.cwd(), 'web'),          // Relative to cwd (project root)
+    '/home/user/websocket-streaming/web'      // Absolute fallback
+];
+
+const webPath = possibleWebPaths.find(p => {
+    try {
+        return fs.existsSync(path.join(p, 'index.html'));
+    } catch (e) {
+        return false;
+    }
+}) || possibleWebPaths[0];
+
+console.log(`[CONFIG] Serving static files from: ${webPath}`);
 app.use(express.static(webPath));
 
-// Explicit route handler for root path (fallback for 404 issues)
+// Explicit route handler for root path
 app.get('/', (req, res) => {
-    res.sendFile(path.join(webPath, 'index.html'));
+    const indexPath = path.join(webPath, 'index.html');
+    res.sendFile(indexPath, (err) => {
+        if (err) {
+            console.error(`[ERROR] Failed to serve index.html: ${err.message}`);
+            res.status(500).send('Error loading page. Check server logs.');
+        }
+    });
 });
 
 // ============================================================================
