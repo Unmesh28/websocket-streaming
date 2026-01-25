@@ -716,6 +716,51 @@ bool WebRTCPeer::initialize() {
         << ", audio_queue: " << gst_element_state_get_name(aq_state2)
         << ", webrtcbin: " << gst_element_state_get_name(wb_state2));
 
+    // CRITICAL FIX: If elements are still PAUSED after linking, force them to PLAYING
+    // This is necessary because sync_state_with_parent() is asynchronous and may not
+    // complete before linking, causing data to be blocked in the queue
+    if (vq_state2 != GST_STATE_PLAYING || aq_state2 != GST_STATE_PLAYING || wb_state2 != GST_STATE_PLAYING) {
+        LOG("PEER", "Elements still not in PLAYING state - forcing state change...");
+
+        // Explicitly set each element to PLAYING state
+        GstStateChangeReturn vq_change = gst_element_set_state(video_queue_, GST_STATE_PLAYING);
+        GstStateChangeReturn aq_change = gst_element_set_state(audio_queue_, GST_STATE_PLAYING);
+        GstStateChangeReturn wb_change = gst_element_set_state(webrtcbin_, GST_STATE_PLAYING);
+
+        LOG("PEER", "State change results - video_queue: "
+            << (vq_change == GST_STATE_CHANGE_SUCCESS ? "SUCCESS" :
+                vq_change == GST_STATE_CHANGE_ASYNC ? "ASYNC" :
+                vq_change == GST_STATE_CHANGE_NO_PREROLL ? "NO_PREROLL" : "FAILURE")
+            << ", audio_queue: "
+            << (aq_change == GST_STATE_CHANGE_SUCCESS ? "SUCCESS" :
+                aq_change == GST_STATE_CHANGE_ASYNC ? "ASYNC" :
+                aq_change == GST_STATE_CHANGE_NO_PREROLL ? "NO_PREROLL" : "FAILURE")
+            << ", webrtcbin: "
+            << (wb_change == GST_STATE_CHANGE_SUCCESS ? "SUCCESS" :
+                wb_change == GST_STATE_CHANGE_ASYNC ? "ASYNC" :
+                wb_change == GST_STATE_CHANGE_NO_PREROLL ? "NO_PREROLL" : "FAILURE"));
+
+        // Wait for state changes to complete (up to 2 seconds)
+        GstState vq_final, aq_final, wb_final;
+        gst_element_get_state(video_queue_, &vq_final, nullptr, 2 * GST_SECOND);
+        gst_element_get_state(audio_queue_, &aq_final, nullptr, 2 * GST_SECOND);
+        gst_element_get_state(webrtcbin_, &wb_final, nullptr, 2 * GST_SECOND);
+
+        LOG("PEER", "Final states after forcing - video_queue: " << gst_element_state_get_name(vq_final)
+            << ", audio_queue: " << gst_element_state_get_name(aq_final)
+            << ", webrtcbin: " << gst_element_state_get_name(wb_final));
+
+        if (vq_final != GST_STATE_PLAYING) {
+            LOG("PEER-WARN", "video_queue failed to reach PLAYING state!");
+        }
+        if (aq_final != GST_STATE_PLAYING) {
+            LOG("PEER-WARN", "audio_queue failed to reach PLAYING state!");
+        }
+        if (wb_final != GST_STATE_PLAYING) {
+            LOG("PEER-WARN", "webrtcbin failed to reach PLAYING state - ICE may not work correctly");
+        }
+    }
+
     // Check queue src pad state and link status
     GstPad* vqueue_src_check = gst_element_get_static_pad(video_queue_, "src");
     if (vqueue_src_check) {
