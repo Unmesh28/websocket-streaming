@@ -47,22 +47,22 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎥 Live Stream</h1>
+            <h1>Live Stream</h1>
             <div class="controls">
                 <input type="text" id="streamId" placeholder="Stream ID" value="pi-camera-stream">
                 <button class="btn-connect" id="connectBtn" onclick="connect()">Connect</button>
                 <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
                 <button class="btn-refresh" id="refreshBtn" onclick="refresh()" disabled>Refresh</button>
-                <button class="fullscreen-btn" onclick="toggleFullscreen()">⛶</button>
+                <button class="fullscreen-btn" onclick="toggleFullscreen()">Fullscreen</button>
             </div>
         </div>
         <div class="video-container">
             <video id="video" autoplay playsinline muted style="background: #000;"></video>
             <div id="overlay" class="overlay hidden"><div class="spinner"></div><div id="overlayText">Connecting...</div></div>
-            <div id="micStatus" class="mic-status">🎤 Transmitting...</div>
+            <div id="micStatus" class="mic-status">Transmitting...</div>
             <div class="ptt-container">
                 <button id="pttBtn" class="btn-ptt disabled no-mic" onmousedown="startTalk()" onmouseup="stopTalk()" onmouseleave="stopTalk()" ontouchstart="startTalk(event)" ontouchend="stopTalk(event)" ontouchcancel="stopTalk(event)">
-                    <span class="icon">🎤</span><span>TALK</span>
+                    <span class="icon">MIC</span><span>TALK</span>
                 </button>
             </div>
         </div>
@@ -76,22 +76,651 @@
         </div>
     </div>
     <script>
-        const AUTO_RECONNECT = true, RECONNECT_DELAY = 2000, MAX_RECONNECT_ATTEMPTS = 1000, CONNECTION_TIMEOUT = 30000, WS_PING_INTERVAL = 25000;
-        let ws = null, pc = null, iceServers = null, isConnecting = false, reconnectAttempts = 0, reconnectTimer = null, connectionTimer = null, lastStreamId = '', wsPingTimer = null;
-        let localStream = null, audioTrack = null, isTalking = false, micPermissionGranted = false, isPlayPending = false, currentStreamId = null;
-        let skipNextCleanup = false; // Flag to skip cleanup when called from refresh()
+        // ============================================================================
+        // CONFIGURATION
+        // ============================================================================
+        const CONFIG = {
+            AUTO_RECONNECT: true,
+            RECONNECT_DELAY_MS: 2000,
+            MAX_RECONNECT_ATTEMPTS: 1000,
+            CONNECTION_TIMEOUT_MS: 30000,
+            WS_PING_INTERVAL_MS: 25000,
+            ICE_DISCONNECT_TIMEOUT_MS: 5000,
+            CLEANUP_WAIT_MS: 500,  // Wait for server cleanup confirmation
+            MAX_MIC_RETRIES: 3
+        };
 
-        const video = document.getElementById('video'), statusDot = document.getElementById('statusDot'), statusText = document.getElementById('statusText');
-        const iceState = document.getElementById('iceState'), micState = document.getElementById('micState'), overlay = document.getElementById('overlay');
-        const overlayText = document.getElementById('overlayText'), reconnectInfo = document.getElementById('reconnectInfo');
-        const connectBtn = document.getElementById('connectBtn'), disconnectBtn = document.getElementById('disconnectBtn');
-        const refreshBtn = document.getElementById('refreshBtn'), pttBtn = document.getElementById('pttBtn'), micStatus = document.getElementById('micStatus');
+        // ============================================================================
+        // STATE MACHINE
+        // ============================================================================
+        const State = {
+            DISCONNECTED: 'disconnected',
+            CONNECTING: 'connecting',
+            WAITING_FOR_STREAM: 'waiting_for_stream',
+            CONNECTED: 'connected',
+            RECONNECTING: 'reconnecting',
+            CLEANING_UP: 'cleaning_up',
+            REFRESHING: 'refreshing'
+        };
 
-        function setStatus(s, d) { statusText.textContent = s; statusDot.className = 'dot dot-' + d; }
-        function showOverlay(t) { overlayText.textContent = t; overlay.classList.remove('hidden'); }
-        function hideOverlay() { overlay.classList.add('hidden'); }
+        let currentState = State.DISCONNECTED;
+        let stateTransitionId = 0;  // Prevents stale callbacks from affecting current state
 
-        // Check if we're in a WebView
+        function setState(newState, reason = '') {
+            const oldState = currentState;
+            currentState = newState;
+            stateTransitionId++;
+            console.log(`[STATE] ${oldState} -> ${newState}${reason ? ': ' + reason : ''}`);
+            updateUI();
+        }
+
+        function canTransitionTo(newState) {
+            // Define valid state transitions
+            const validTransitions = {
+                [State.DISCONNECTED]: [State.CONNECTING, State.REFRESHING],
+                [State.CONNECTING]: [State.WAITING_FOR_STREAM, State.DISCONNECTED, State.CLEANING_UP],
+                [State.WAITING_FOR_STREAM]: [State.CONNECTED, State.DISCONNECTED, State.CLEANING_UP],
+                [State.CONNECTED]: [State.DISCONNECTED, State.CLEANING_UP, State.REFRESHING],
+                [State.RECONNECTING]: [State.CONNECTING, State.DISCONNECTED],
+                [State.CLEANING_UP]: [State.DISCONNECTED, State.RECONNECTING, State.CONNECTING],
+                [State.REFRESHING]: [State.CONNECTING, State.DISCONNECTED, State.CLEANING_UP]
+            };
+            return validTransitions[currentState]?.includes(newState) ?? false;
+        }
+
+        // ============================================================================
+        // GLOBAL STATE
+        // ============================================================================
+        let ws = null;
+        let pc = null;
+        let iceServers = null;
+        let reconnectAttempts = 0;
+        let lastStreamId = '';
+        let currentViewerId = null;
+
+        // Timers
+        let reconnectTimer = null;
+        let connectionTimer = null;
+        let wsPingTimer = null;
+        let iceDisconnectTimer = null;
+        let cleanupTimeoutTimer = null;
+
+        // Microphone
+        let localStream = null;
+        let audioTrack = null;
+        let isTalking = false;
+        let micPermissionGranted = false;
+        let micRetryCount = 0;
+
+        // Video
+        let isPlayPending = false;
+        let currentMediaStreamId = null;
+
+        // ============================================================================
+        // DOM ELEMENTS
+        // ============================================================================
+        const video = document.getElementById('video');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const iceStateEl = document.getElementById('iceState');
+        const micState = document.getElementById('micState');
+        const overlay = document.getElementById('overlay');
+        const overlayText = document.getElementById('overlayText');
+        const reconnectInfo = document.getElementById('reconnectInfo');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const pttBtn = document.getElementById('pttBtn');
+        const micStatus = document.getElementById('micStatus');
+
+        // ============================================================================
+        // UI HELPERS
+        // ============================================================================
+        function setStatus(s, dotColor) {
+            statusText.textContent = s;
+            statusDot.className = 'dot dot-' + dotColor;
+        }
+
+        function showOverlay(text) {
+            overlayText.textContent = text;
+            overlay.classList.remove('hidden');
+        }
+
+        function hideOverlay() {
+            overlay.classList.add('hidden');
+        }
+
+        function updateUI() {
+            switch (currentState) {
+                case State.DISCONNECTED:
+                    setStatus('Disconnected', 'red');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    refreshBtn.disabled = true;
+                    pttBtn.classList.add('disabled');
+                    break;
+                case State.CONNECTING:
+                case State.WAITING_FOR_STREAM:
+                case State.REFRESHING:
+                    setStatus('Connecting...', 'yellow');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = true;
+                    refreshBtn.disabled = true;
+                    pttBtn.classList.add('disabled');
+                    break;
+                case State.CONNECTED:
+                    setStatus('Connected', 'green');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                    refreshBtn.disabled = false;
+                    if (micPermissionGranted) pttBtn.classList.remove('disabled');
+                    break;
+                case State.CLEANING_UP:
+                case State.RECONNECTING:
+                    setStatus('Reconnecting...', 'yellow');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = true;
+                    refreshBtn.disabled = true;
+                    pttBtn.classList.add('disabled');
+                    break;
+            }
+        }
+
+        // ============================================================================
+        // TIMER MANAGEMENT
+        // ============================================================================
+        function clearAllTimers() {
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            if (connectionTimer) { clearTimeout(connectionTimer); connectionTimer = null; }
+            if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
+            if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
+            if (cleanupTimeoutTimer) { clearTimeout(cleanupTimeoutTimer); cleanupTimeoutTimer = null; }
+        }
+
+        // ============================================================================
+        // WEBRTC CLEANUP
+        // ============================================================================
+        async function cleanupWebRTC(keepMic = false) {
+            console.log('[CLEANUP] Cleaning up WebRTC, keepMic:', keepMic);
+
+            // Clear ICE disconnect timer
+            if (iceDisconnectTimer) {
+                clearTimeout(iceDisconnectTimer);
+                iceDisconnectTimer = null;
+            }
+
+            // Close peer connection
+            if (pc) {
+                pc.ontrack = null;
+                pc.onicecandidate = null;
+                pc.oniceconnectionstatechange = null;
+                pc.onconnectionstatechange = null;
+                try { pc.close(); } catch (e) { console.log('[CLEANUP] PC close error:', e.message); }
+                pc = null;
+            }
+
+            // Stop video tracks
+            if (video.srcObject) {
+                try {
+                    video.srcObject.getTracks().forEach(t => {
+                        try { t.stop(); } catch (e) {}
+                    });
+                } catch (e) {}
+                video.srcObject = null;
+            }
+
+            isPlayPending = false;
+            currentMediaStreamId = null;
+            iceStateEl.textContent = '-';
+
+            // Clean up mic if not keeping
+            if (!keepMic && localStream) {
+                try {
+                    localStream.getTracks().forEach(t => {
+                        try { t.stop(); } catch (e) {}
+                    });
+                } catch (e) {}
+                localStream = null;
+                audioTrack = null;
+                micPermissionGranted = false;
+                pttBtn.classList.add('no-mic', 'disabled');
+                micState.textContent = 'Off';
+            }
+        }
+
+        function cleanupWebSocket() {
+            console.log('[CLEANUP] Cleaning up WebSocket');
+
+            if (wsPingTimer) {
+                clearInterval(wsPingTimer);
+                wsPingTimer = null;
+            }
+
+            if (ws) {
+                ws.onopen = null;
+                ws.onmessage = null;
+                ws.onerror = null;
+                ws.onclose = null;
+                try {
+                    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                        ws.close(1000, 'Cleanup');
+                    }
+                } catch (e) {
+                    console.log('[CLEANUP] WS close error:', e.message);
+                }
+                ws = null;
+            }
+
+            currentViewerId = null;
+        }
+
+        // ============================================================================
+        // CONNECTION FAILURE HANDLING (IDEMPOTENT)
+        // ============================================================================
+        function handleConnectionFailure(reason) {
+            console.log('[FAILURE] Connection failure:', reason, 'currentState:', currentState);
+
+            // Ignore if already in a terminal or transitional state
+            if (currentState === State.DISCONNECTED ||
+                currentState === State.CLEANING_UP ||
+                currentState === State.REFRESHING) {
+                console.log('[FAILURE] Ignoring, already in state:', currentState);
+                return;
+            }
+
+            const transitionId = stateTransitionId;
+            setState(State.CLEANING_UP, reason);
+
+            clearAllTimers();
+            showOverlay(reason);
+
+            // Clean up everything
+            cleanupWebRTC(true);  // Keep mic for reconnect
+            cleanupWebSocket();
+
+            // Check if state changed while we were cleaning up
+            if (stateTransitionId !== transitionId + 1) {
+                console.log('[FAILURE] State changed during cleanup, aborting');
+                return;
+            }
+
+            // Attempt reconnect if enabled
+            if (CONFIG.AUTO_RECONNECT && lastStreamId && reconnectAttempts < CONFIG.MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++;
+                const delay = reconnectAttempts <= 3 ?
+                    CONFIG.RECONNECT_DELAY_MS :
+                    Math.min(CONFIG.RECONNECT_DELAY_MS * Math.floor(reconnectAttempts / 3), 15000);
+
+                reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`;
+                showOverlay(`${reason} - Reconnecting...`);
+
+                setState(State.RECONNECTING, 'scheduled');
+
+                reconnectTimer = setTimeout(() => {
+                    if (currentState === State.RECONNECTING) {
+                        document.getElementById('streamId').value = lastStreamId;
+                        connect();
+                    }
+                }, delay);
+            } else {
+                setState(State.DISCONNECTED, 'no reconnect');
+                hideOverlay();
+            }
+        }
+
+        // ============================================================================
+        // MAIN CONNECT FUNCTION
+        // ============================================================================
+        async function connect() {
+            console.log('[CONNECT] Starting connect, currentState:', currentState);
+
+            // Validate state transition
+            if (currentState !== State.DISCONNECTED &&
+                currentState !== State.RECONNECTING &&
+                currentState !== State.REFRESHING) {
+                console.log('[CONNECT] Invalid state for connect:', currentState);
+                return;
+            }
+
+            const streamId = document.getElementById('streamId').value.trim();
+            if (!streamId) {
+                alert('Enter stream ID');
+                return;
+            }
+
+            lastStreamId = streamId;
+            reconnectInfo.textContent = '';
+
+            // Only clean up if not coming from refresh (refresh already cleaned up)
+            if (currentState !== State.REFRESHING) {
+                await cleanupWebRTC(true);
+                cleanupWebSocket();
+            }
+
+            setState(State.CONNECTING, 'initiated');
+            showOverlay('Connecting...');
+
+            // Request mic permission if not already granted
+            if (!micPermissionGranted) {
+                await requestMicPermission();
+            }
+
+            // Fetch TURN credentials
+            try {
+                const res = await fetch('/turn-credentials');
+                if (res.ok) {
+                    const data = await res.json();
+                    iceServers = data.iceServers;
+                }
+            } catch (e) {
+                console.log('[CONNECT] Failed to fetch TURN credentials:', e.message);
+                iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+            }
+
+            // Create WebSocket connection
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}`);
+
+            // Connection timeout
+            connectionTimer = setTimeout(() => {
+                if (currentState === State.CONNECTING || currentState === State.WAITING_FOR_STREAM) {
+                    handleConnectionFailure('Connection timeout');
+                }
+            }, CONFIG.CONNECTION_TIMEOUT_MS);
+
+            ws.onopen = () => {
+                console.log('[WS] Connected');
+
+                // Send join request
+                ws.send(JSON.stringify({
+                    type: 'join',
+                    stream_id: streamId
+                }));
+
+                // Start ping interval
+                wsPingTimer = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, CONFIG.WS_PING_INTERVAL_MS);
+            };
+
+            ws.onmessage = async (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    await handleServerMessage(data);
+                } catch (err) {
+                    console.error('[WS] Message parse error:', err);
+                }
+            };
+
+            ws.onerror = (e) => {
+                console.error('[WS] Error');
+                handleConnectionFailure('Connection error');
+            };
+
+            ws.onclose = (e) => {
+                console.log('[WS] Closed, code:', e.code, 'reason:', e.reason);
+                if (currentState === State.CONNECTING ||
+                    currentState === State.WAITING_FOR_STREAM ||
+                    currentState === State.CONNECTED) {
+                    handleConnectionFailure('Connection lost');
+                }
+            };
+        }
+
+        // ============================================================================
+        // SERVER MESSAGE HANDLING
+        // ============================================================================
+        async function handleServerMessage(data) {
+            console.log('[MSG]', data.type);
+
+            switch (data.type) {
+                case 'joined':
+                    currentViewerId = data.viewer_id;
+                    console.log('[MSG] Joined as:', currentViewerId);
+                    if (currentState === State.CONNECTING) {
+                        setState(State.WAITING_FOR_STREAM, 'joined');
+                        showOverlay('Waiting for stream...');
+                    }
+                    break;
+
+                case 'cleanup-complete':
+                    console.log('[MSG] Server confirmed cleanup of:', data.old_viewer_id);
+                    // Server has cleaned up old viewer, we can proceed
+                    break;
+
+                case 'offer':
+                    await handleOffer(data.sdp, data.from, data.sequence);
+                    break;
+
+                case 'ice-candidate':
+                    if (pc && data.candidate) {
+                        try {
+                            await pc.addIceCandidate({
+                                candidate: data.candidate,
+                                sdpMLineIndex: data.sdpMLineIndex
+                            });
+                        } catch (e) {
+                            console.log('[ICE] Add candidate error:', e.message);
+                        }
+                    }
+                    break;
+
+                case 'broadcaster-left':
+                    handleConnectionFailure('Stream ended');
+                    break;
+
+                case 'error':
+                    handleConnectionFailure(data.message || 'Server error');
+                    break;
+
+                case 'pong':
+                    // Keep-alive response, nothing to do
+                    break;
+
+                default:
+                    console.log('[MSG] Unknown message type:', data.type);
+            }
+        }
+
+        // ============================================================================
+        // WEBRTC OFFER HANDLING
+        // ============================================================================
+        async function handleOffer(sdp, streamId, sequence) {
+            console.log('[OFFER] Received offer from:', streamId, 'seq:', sequence);
+
+            // Create new peer connection
+            pc = new RTCPeerConnection({
+                iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            // Add audio track if available
+            if (audioTrack && localStream) {
+                console.log('[OFFER] Adding audio track to peer connection');
+                try {
+                    pc.addTrack(audioTrack, localStream);
+                } catch (e) {
+                    console.log('[OFFER] Add track error:', e.message);
+                }
+            }
+
+            // Handle incoming tracks
+            pc.ontrack = (e) => {
+                console.log('[TRACK] Received:', e.track.kind);
+
+                if (e.streams && e.streams[0]) {
+                    const stream = e.streams[0];
+
+                    if (video.srcObject !== stream) {
+                        console.log('[TRACK] Setting video srcObject');
+                        video.srcObject = stream;
+                        currentMediaStreamId = stream.id;
+                    }
+
+                    // Try to play video
+                    if (!isPlayPending && video.paused) {
+                        isPlayPending = true;
+                        setTimeout(() => {
+                            if (!pc || video.srcObject !== stream) {
+                                console.log('[PLAY] Cancelled, stream changed');
+                                isPlayPending = false;
+                                return;
+                            }
+
+                            video.play()
+                                .then(() => {
+                                    console.log('[PLAY] Video playing');
+                                    isPlayPending = false;
+                                })
+                                .catch(err => {
+                                    console.log('[PLAY] Error:', err.name, '- trying muted');
+                                    video.muted = true;
+                                    video.play()
+                                        .then(() => {
+                                            console.log('[PLAY] Muted video playing');
+                                            isPlayPending = false;
+                                        })
+                                        .catch(e2 => {
+                                            console.error('[PLAY] Muted play failed:', e2);
+                                            isPlayPending = false;
+                                        });
+                                });
+                        }, 100);
+                    }
+
+                    // Mark connected when video track arrives
+                    if (e.track.kind === 'video') {
+                        clearTimeout(connectionTimer);
+                        connectionTimer = null;
+                        reconnectAttempts = 0;
+                        reconnectInfo.textContent = '';
+                        setState(State.CONNECTED, 'video track received');
+                        hideOverlay();
+                    }
+                }
+            };
+
+            // ICE connection state handling
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                iceStateEl.textContent = state;
+                console.log('[ICE] State:', state);
+
+                // Clear any existing disconnect timer
+                if (iceDisconnectTimer) {
+                    clearTimeout(iceDisconnectTimer);
+                    iceDisconnectTimer = null;
+                }
+
+                if (state === 'failed') {
+                    handleConnectionFailure('ICE connection failed');
+                } else if (state === 'disconnected') {
+                    // Wait before declaring failure - ICE might recover
+                    iceDisconnectTimer = setTimeout(() => {
+                        if (pc && pc.iceConnectionState === 'disconnected') {
+                            handleConnectionFailure('ICE disconnected');
+                        }
+                    }, CONFIG.ICE_DISCONNECT_TIMEOUT_MS);
+                } else if (state === 'connected' || state === 'completed') {
+                    // ICE recovered or connected
+                    if (currentState === State.CONNECTED) {
+                        reconnectInfo.textContent = '';
+                    }
+                }
+            };
+
+            // Connection state change handling
+            pc.onconnectionstatechange = () => {
+                console.log('[PC] Connection state:', pc.connectionState);
+                if (pc.connectionState === 'failed') {
+                    handleConnectionFailure('Connection failed');
+                }
+            };
+
+            // ICE candidate handling
+            pc.onicecandidate = (e) => {
+                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        to: streamId,
+                        candidate: e.candidate.candidate,
+                        sdpMLineIndex: e.candidate.sdpMLineIndex
+                    }));
+                }
+            };
+
+            // Set remote description and create answer
+            try {
+                await pc.setRemoteDescription({ type: 'offer', sdp });
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+
+                // Send answer
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'answer',
+                        to: streamId,
+                        sdp: answer.sdp
+                    }));
+                }
+            } catch (e) {
+                console.error('[OFFER] Error processing offer:', e);
+                handleConnectionFailure('Failed to process offer');
+            }
+        }
+
+        // ============================================================================
+        // DISCONNECT
+        // ============================================================================
+        async function disconnect() {
+            console.log('[DISCONNECT] User initiated disconnect');
+
+            // Prevent auto-reconnect
+            reconnectAttempts = CONFIG.MAX_RECONNECT_ATTEMPTS;
+            lastStreamId = '';
+
+            clearAllTimers();
+            await cleanupWebRTC(false);  // Release mic too
+            cleanupWebSocket();
+
+            setState(State.DISCONNECTED, 'user initiated');
+            hideOverlay();
+            reconnectInfo.textContent = '';
+        }
+
+        // ============================================================================
+        // REFRESH
+        // ============================================================================
+        async function refresh() {
+            console.log('[REFRESH] User initiated refresh');
+
+            if (currentState !== State.CONNECTED) {
+                console.log('[REFRESH] Not connected, ignoring');
+                return;
+            }
+
+            clearAllTimers();
+            reconnectAttempts = 0;
+
+            setState(State.REFRESHING, 'initiated');
+            showOverlay('Reconnecting...');
+
+            // Clean up WebRTC but keep mic
+            await cleanupWebRTC(true);
+            cleanupWebSocket();
+
+            // Small delay to let server process cleanup
+            setTimeout(() => {
+                if (currentState === State.REFRESHING) {
+                    connect();
+                }
+            }, CONFIG.CLEANUP_WAIT_MS);
+        }
+
+        // ============================================================================
+        // MICROPHONE HANDLING
+        // ============================================================================
         function isWebView() {
             const ua = navigator.userAgent || '';
             return ua.includes('wv') || ua.includes('WebView') ||
@@ -99,18 +728,17 @@
                    window.flutterMicGranted !== undefined;
         }
 
-        // Check if we're in a secure context (HTTPS or localhost)
         function isSecureContext() {
             if (window.isSecureContext !== undefined) return window.isSecureContext;
-            return location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+            return location.protocol === 'https:' ||
+                   location.hostname === 'localhost' ||
+                   location.hostname === '127.0.0.1';
         }
 
-        // Wait for getUserMedia to become available (WebView may load it async)
         async function waitForGetUserMedia(maxWaitMs = 3000) {
             const startTime = Date.now();
             while (Date.now() - startTime < maxWaitMs) {
                 if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    console.log('[Mic] getUserMedia available after', Date.now() - startTime, 'ms');
                     return true;
                 }
                 await new Promise(r => setTimeout(r, 100));
@@ -118,178 +746,124 @@
             return false;
         }
 
-        let micRetryCount = 0;
-        const MAX_MIC_RETRIES = 3;
-
         async function requestMicPermission(isRetry = false) {
-            console.log('[Mic] requestMicPermission called, isRetry:', isRetry, 'attempt:', micRetryCount + 1);
+            console.log('[MIC] Requesting permission, retry:', isRetry);
 
-            // Check secure context first
             if (!isSecureContext()) {
-                console.warn('[Mic] Not in secure context (HTTPS required)');
+                console.warn('[MIC] Not in secure context');
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
                 micState.textContent = 'Need HTTPS';
-                micState.style.cursor = 'help';
-                micState.title = 'Microphone requires HTTPS connection';
                 return false;
             }
 
-            // Wait for getUserMedia API to be available (important for WebView)
             const apiAvailable = await waitForGetUserMedia(isWebView() ? 5000 : 2000);
-
             if (!apiAvailable) {
-                console.error('[Mic] getUserMedia API not available after waiting');
+                console.error('[MIC] getUserMedia not available');
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
                 micState.textContent = 'Tap to enable';
                 micState.style.cursor = 'pointer';
-                micState.onclick = () => requestMicPermission(true);
                 return false;
             }
 
-            try {
-                console.log('[Mic] Requesting microphone permission...');
-                console.log('[Mic] isWebView:', isWebView(), 'isSecureContext:', isSecureContext());
+            const constraintOptions = [
+                { audio: true },
+                { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } },
+                { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }
+            ];
 
-                // Try different constraint configurations
-                const constraintOptions = [
-                    { audio: true },
-                    { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } },
-                    { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
-                    { audio: { sampleRate: 44100 } }
-                ];
+            let stream = null;
+            let lastError = null;
 
-                let stream = null;
-                let lastError = null;
-
-                for (const constraints of constraintOptions) {
-                    try {
-                        console.log('[Mic] Trying constraints:', JSON.stringify(constraints));
-                        stream = await navigator.mediaDevices.getUserMedia(constraints);
-                        console.log('[Mic] Success with constraints:', JSON.stringify(constraints));
-                        break;
-                    } catch (e) {
-                        console.log('[Mic] Failed with constraints:', e.name, e.message);
-                        lastError = e;
-                    }
+            for (const constraints of constraintOptions) {
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    break;
+                } catch (e) {
+                    lastError = e;
                 }
+            }
 
-                if (!stream) {
-                    throw lastError || new Error('All constraint options failed');
-                }
-
-                localStream = stream;
-                audioTrack = localStream.getAudioTracks()[0];
-
-                if (audioTrack) {
-                    audioTrack.enabled = false;
-                    micPermissionGranted = true;
-                    micRetryCount = 0;
-                    pttBtn.classList.remove('no-mic', 'disabled');
-                    micState.textContent = 'Ready';
-                    micState.style.cursor = 'default';
-                    micState.onclick = null;
-                    console.log('[Mic] SUCCESS - Mic granted:', audioTrack.label);
-                    return true;
-                } else {
-                    throw new Error('No audio track in stream');
-                }
-            } catch (e) {
-                console.error('[Mic] Error:', e.name, e.message);
+            if (!stream) {
+                console.error('[MIC] All constraint options failed:', lastError?.message);
                 micPermissionGranted = false;
                 pttBtn.classList.add('no-mic');
 
-                // Determine user-friendly message
-                if (e.name === 'NotAllowedError') {
+                if (lastError?.name === 'NotAllowedError') {
                     micState.textContent = 'Denied';
-                    micState.title = 'Permission denied. Tap to retry or check app settings.';
-                } else if (e.name === 'NotFoundError') {
+                } else if (lastError?.name === 'NotFoundError') {
                     micState.textContent = 'No mic';
-                    micState.title = 'No microphone found on device';
-                } else if (e.name === 'NotReadableError') {
-                    micState.textContent = 'Mic busy';
-                    micState.title = 'Microphone is being used by another app';
-                } else if (e.name === 'OverconstrainedError') {
-                    micState.textContent = 'Tap to enable';
-                    micState.title = 'Mic constraints not supported, tap to retry';
                 } else {
                     micState.textContent = 'Tap to enable';
-                    micState.title = 'Error: ' + e.message;
                 }
 
-                // Enable tap to retry
                 micState.style.cursor = 'pointer';
-                micState.onclick = () => requestMicPermission(true);
 
-                // Auto-retry in WebView (permission dialog may take time)
-                if (isWebView() && !isRetry && micRetryCount < MAX_MIC_RETRIES) {
+                // Auto-retry in WebView
+                if (isWebView() && !isRetry && micRetryCount < CONFIG.MAX_MIC_RETRIES) {
                     micRetryCount++;
-                    console.log('[Mic] WebView auto-retry in 2s, attempt:', micRetryCount);
                     setTimeout(() => requestMicPermission(true), 2000);
                 }
 
                 return false;
             }
+
+            localStream = stream;
+            audioTrack = localStream.getAudioTracks()[0];
+
+            if (audioTrack) {
+                audioTrack.enabled = false;
+                micPermissionGranted = true;
+                micRetryCount = 0;
+                pttBtn.classList.remove('no-mic', 'disabled');
+                micState.textContent = 'Ready';
+                micState.style.cursor = 'default';
+                console.log('[MIC] Permission granted:', audioTrack.label);
+                return true;
+            }
+
+            return false;
         }
 
         async function startTalk(event) {
             if (event) event.preventDefault();
 
-            // If mic not available, try to request permission
             if (!micPermissionGranted) {
-                console.log('[PTT] Mic not granted, requesting permission...');
-                pttBtn.classList.add('active'); // Show feedback
+                pttBtn.classList.add('active');
                 micState.textContent = 'Requesting...';
-
                 const granted = await requestMicPermission(true);
-
                 pttBtn.classList.remove('active');
 
                 if (!granted) {
-                    console.log('[PTT] Permission not granted');
-                    // Show helpful message
                     micState.textContent = 'Tap Mic to enable';
                     return;
                 }
 
-                // Permission granted - add track to peer connection
                 if (pc && audioTrack) {
                     try {
                         pc.addTrack(audioTrack, localStream);
-                        console.log('[PTT] Added audio track to peer connection');
                     } catch (e) {
-                        console.log('[PTT] Track already added or error:', e.message);
+                        console.log('[PTT] Track add error:', e.message);
                     }
                 }
             }
 
-            // Check if we can actually talk
-            if (!pc) {
-                console.log('[PTT] No peer connection');
-                return;
-            }
-            if (pc.connectionState !== 'connected') {
-                console.log('[PTT] Not connected, state:', pc.connectionState);
-                return;
-            }
-            if (!audioTrack) {
-                console.log('[PTT] No audio track');
+            if (!pc || pc.connectionState !== 'connected' || !audioTrack) {
                 return;
             }
 
-            // Start talking!
             isTalking = true;
             audioTrack.enabled = true;
             pttBtn.classList.add('active');
             micStatus.classList.add('active');
             micState.textContent = 'Talking';
-            console.log('[PTT] Started talking');
         }
+
         function stopTalk(event) {
             if (event) event.preventDefault();
             if (!audioTrack) return;
-            if (isTalking) console.log('[PTT] Stopped talking');
+
             isTalking = false;
             audioTrack.enabled = false;
             pttBtn.classList.remove('active');
@@ -297,124 +871,65 @@
             if (micPermissionGranted) micState.textContent = 'Ready';
         }
 
-        async function connect() {
-            if (isConnecting) { console.log('Connect: Already connecting, ignoring'); return; }
-            const streamId = document.getElementById('streamId').value.trim(); if (!streamId) { alert('Enter stream ID'); return; }
-            lastStreamId = streamId; isConnecting = true; reconnectInfo.textContent = '';
-
-            // Only cleanup if not already done by refresh()
-            if (skipNextCleanup) { skipNextCleanup = false; console.log('Connect: Skipping cleanup (already done by refresh)'); }
-            else { await cleanup(); }
-
-            if (!micPermissionGranted) await requestMicPermission();
-            setStatus('Connecting...', 'yellow'); showOverlay('Connecting...'); connectBtn.disabled = true; disconnectBtn.disabled = true; refreshBtn.disabled = true; pttBtn.classList.add('disabled');
-            try { const res = await fetch('/turn-credentials'); if (res.ok) iceServers = (await res.json()).iceServers; } catch (e) { iceServers = [{ urls: 'stun:stun.l.google.com:19302' }]; }
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${location.host}`);
-            connectionTimer = setTimeout(() => { if (isConnecting) handleConnectionFailure('Connection timeout'); }, CONNECTION_TIMEOUT);
-            ws.onopen = () => { console.log('WebSocket connected'); ws.send(JSON.stringify({ type: 'join', stream_id: streamId })); clearInterval(wsPingTimer); wsPingTimer = setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, WS_PING_INTERVAL); };
-            ws.onmessage = async (e) => {
-                const data = JSON.parse(e.data);
-                if (data.type === 'joined') showOverlay('Waiting for stream...');
-                else if (data.type === 'offer') await handleOffer(data.sdp, data.from);
-                else if (data.type === 'ice-candidate' && pc && data.candidate) try { await pc.addIceCandidate({ candidate: data.candidate, sdpMLineIndex: data.sdpMLineIndex }); } catch (e) {}
-                else if (data.type === 'broadcaster-left') handleConnectionFailure('Stream ended');
-                else if (data.type === 'error') handleConnectionFailure(data.message || 'Error');
-            };
-            ws.onerror = () => handleConnectionFailure('Connection error');
-            ws.onclose = () => { if (isConnecting || statusText.textContent === 'Connected') handleConnectionFailure('Connection lost'); };
+        // ============================================================================
+        // FULLSCREEN
+        // ============================================================================
+        function toggleFullscreen() {
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else {
+                document.querySelector('.video-container').requestFullscreen();
+            }
         }
 
-        async function handleOffer(sdp, streamId) {
-            pc = new RTCPeerConnection({ iceServers: iceServers || [{ urls: 'stun:stun.l.google.com:19302' }] });
-            if (audioTrack) { console.log('Adding audio track'); pc.addTrack(audioTrack, localStream); }
-            pc.ontrack = (e) => {
-                console.log('Track received:', e.track.kind, 'streams:', e.streams.length);
-                if (e.streams && e.streams[0]) {
-                    const stream = e.streams[0];
-                    if (video.srcObject !== stream) { console.log('Setting video srcObject (new stream)'); video.srcObject = stream; currentStreamId = stream.id; }
-                    else { console.log('Same stream, skipping srcObject assignment'); }
-
-                    if (!isPlayPending && video.paused) {
-                        isPlayPending = true;
-                        setTimeout(() => {
-                            if (!pc || video.srcObject !== stream) { console.log('Play cancelled: stream changed'); isPlayPending = false; return; }
-                            console.log('Attempting play, paused:', video.paused, 'readyState:', video.readyState);
-                            video.play().then(() => { console.log('Video playing'); isPlayPending = false; }).catch(err => { console.log('Play error:', err.name); video.muted = true; video.play().then(() => { console.log('Muted video playing'); isPlayPending = false; }).catch(e2 => { console.error('Muted play failed:', e2); isPlayPending = false; }); });
-                        }, 100);
-                    }
-                    if (e.track.kind === 'video') { clearTimeout(connectionTimer); isConnecting = false; reconnectAttempts = 0; setStatus('Connected', 'green'); hideOverlay(); disconnectBtn.disabled = false; refreshBtn.disabled = false; if (micPermissionGranted) pttBtn.classList.remove('disabled'); reconnectInfo.textContent = ''; }
-                } else { console.warn('No streams in track event'); }
-            };
-            pc.oniceconnectionstatechange = () => { iceState.textContent = pc.iceConnectionState; console.log('ICE:', pc.iceConnectionState); if (pc.iceConnectionState === 'failed') handleConnectionFailure('ICE failed'); else if (pc.iceConnectionState === 'disconnected') setTimeout(() => { if (pc && pc.iceConnectionState === 'disconnected') handleConnectionFailure('ICE disconnected'); }, 5000); };
-            pc.onicecandidate = (e) => { if (e.candidate && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ice-candidate', to: streamId, candidate: e.candidate.candidate, sdpMLineIndex: e.candidate.sdpMLineIndex })); };
-            await pc.setRemoteDescription({ type: 'offer', sdp }); const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
-            ws.send(JSON.stringify({ type: 'answer', to: streamId, sdp: answer.sdp }));
-        }
-
-        function handleConnectionFailure(reason) {
-            clearTimeout(connectionTimer); isConnecting = false; setStatus('Disconnected', 'red'); showOverlay(reason); iceState.textContent = '-'; pttBtn.classList.add('disabled'); stopTalk(); cleanup(true);
-            connectBtn.disabled = false; disconnectBtn.disabled = true; refreshBtn.disabled = true;
-
-            // Don't auto-reconnect if a manual refresh is in progress
-            if (skipNextCleanup) { console.log('handleConnectionFailure: Manual refresh in progress, skipping auto-reconnect'); return; }
-
-            if (AUTO_RECONNECT && lastStreamId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) { reconnectAttempts++; const delay = reconnectAttempts <= 3 ? RECONNECT_DELAY : Math.min(RECONNECT_DELAY * Math.floor(reconnectAttempts / 3), 15000); reconnectInfo.textContent = `Reconnecting in ${(delay/1000).toFixed(1)}s (attempt ${reconnectAttempts})`; showOverlay(`${reason} - Reconnecting...`); reconnectTimer = setTimeout(() => { document.getElementById('streamId').value = lastStreamId; connect(); }, delay); }
-        }
-
-        async function cleanup(keepMic = false) {
-            console.log('Cleanup: Starting, keepMic:', keepMic);
-            clearTimeout(reconnectTimer); clearTimeout(connectionTimer); clearInterval(wsPingTimer);
-            reconnectTimer = null; connectionTimer = null; wsPingTimer = null;
-            if (pc) { pc.ontrack = null; pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.close(); pc = null; }
-            if (ws) { ws.onopen = null; ws.onmessage = null; ws.onerror = null; ws.onclose = null; if (ws.readyState === WebSocket.OPEN) ws.close(); ws = null; }
-            if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
-            isPlayPending = false; currentStreamId = null;
-            if (!keepMic && localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; audioTrack = null; micPermissionGranted = false; pttBtn.classList.add('no-mic', 'disabled'); micState.textContent = 'Off'; }
-        }
-
-        async function disconnect() { reconnectAttempts = MAX_RECONNECT_ATTEMPTS; lastStreamId = ''; await cleanup(false); setStatus('Disconnected', 'red'); hideOverlay(); iceState.textContent = '-'; reconnectInfo.textContent = ''; connectBtn.disabled = false; disconnectBtn.disabled = true; refreshBtn.disabled = true; pttBtn.classList.add('disabled'); }
-
-        async function refresh() {
-            console.log('Refresh: Starting refresh');
-            clearTimeout(reconnectTimer); reconnectTimer = null;
-            reconnectAttempts = 0;
-            isConnecting = false; // Reset in case previous connect was stuck
-            await cleanup(true); // Keep mic
-            skipNextCleanup = true; // Set flag so connect() doesn't cleanup again
-            showOverlay('Reconnecting...');
-            // CRITICAL: Wait longer for Pi to clean up old peer connection
-            // The Pi needs ~2s to cleanup TURN/ICE resources properly
-            setTimeout(() => { if (skipNextCleanup) connect(); }, 2000);
-        }
-
-        function toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen(); else document.querySelector('.video-container').requestFullscreen(); }
-
+        // ============================================================================
+        // VISIBILITY CHANGE HANDLING
+        // ============================================================================
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && statusText.textContent !== 'Connected' && lastStreamId) {
-                if (skipNextCleanup) { console.log('Visibility: Skipping auto-reconnect, refresh in progress'); return; }
-                console.log('Visibility: Page visible, attempting reconnect');
-                reconnectAttempts = 0; setTimeout(connect, 500);
+            if (!document.hidden && currentState === State.DISCONNECTED && lastStreamId) {
+                console.log('[VISIBILITY] Page visible, attempting reconnect');
+                reconnectAttempts = 0;
+                setTimeout(connect, 500);
             }
         });
 
-        let lastTouchEnd = 0; document.addEventListener('touchend', (e) => { const now = Date.now(); if (now - lastTouchEnd <= 300 && e.target.closest('.video-container') && !e.target.closest('button')) e.preventDefault(); lastTouchEnd = now; }, { passive: false });
-        video.addEventListener('canplay', () => console.log('Video canplay')); video.addEventListener('playing', () => console.log('Video playing')); video.addEventListener('error', (e) => console.error('Video error:', e)); video.addEventListener('loadedmetadata', () => console.log('Video metadata:', video.videoWidth, 'x', video.videoHeight));
+        // ============================================================================
+        // PREVENT DOUBLE-TAP ZOOM
+        // ============================================================================
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', (e) => {
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300 &&
+                e.target.closest('.video-container') &&
+                !e.target.closest('button')) {
+                e.preventDefault();
+            }
+            lastTouchEnd = now;
+        }, { passive: false });
 
-        // Initialize mic status display
+        // ============================================================================
+        // VIDEO EVENT LOGGING
+        // ============================================================================
+        video.addEventListener('canplay', () => console.log('[VIDEO] canplay'));
+        video.addEventListener('playing', () => console.log('[VIDEO] playing'));
+        video.addEventListener('error', (e) => console.error('[VIDEO] error:', e));
+        video.addEventListener('loadedmetadata', () => {
+            console.log('[VIDEO] metadata:', video.videoWidth, 'x', video.videoHeight);
+        });
+
+        // ============================================================================
+        // INITIALIZATION
+        // ============================================================================
+        console.log('[INIT] Viewer ready');
+        console.log('[INIT] isWebView:', isWebView());
+        console.log('[INIT] isSecureContext:', isSecureContext());
+
         micState.textContent = 'Tap to enable';
         pttBtn.classList.add('no-mic');
 
-        // Log environment info
-        console.log('[Init] Viewer ready');
-        console.log('[Init] isWebView:', isWebView());
-        console.log('[Init] isSecureContext:', isSecureContext());
-        console.log('[Init] Protocol:', location.protocol);
-        console.log('[Init] User-Agent:', navigator.userAgent);
-
-        // Auto-request mic permission after short delay (gives WebView time to initialize)
+        // Auto-request mic permission after short delay
         setTimeout(() => {
-            console.log('[Init] Auto-requesting mic permission...');
+            console.log('[INIT] Auto-requesting mic permission...');
             requestMicPermission(false);
         }, 1000);
     </script>
