@@ -175,6 +175,13 @@ private:
     // process ICE candidates simultaneously
     static std::mutex global_ice_mutex_;
 
+    // Track last ICE operation time to prevent rapid concurrent ICE operations
+    // that can trigger libnice assertion failures
+    static std::chrono::steady_clock::time_point last_ice_operation_time_;
+
+    // Minimum time between ICE operations across all peers (milliseconds)
+    static constexpr int ICE_OPERATION_COOLDOWN_MS = 100;
+
     // GStreamer callbacks
     static void onNegotiationNeeded(GstElement* webrtc, gpointer user_data);
     static void onIceCandidate(GstElement* webrtc, guint mlineindex,
