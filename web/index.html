@@ -400,9 +400,9 @@
             setState(State.CONNECTING, 'initiated');
             showOverlay('Connecting...');
 
-            // Request mic permission if not already granted
+            // Request mic permission in background - don't block video connection
             if (!micPermissionGranted) {
-                await requestMicPermission();
+                requestMicPermission().catch(e => console.log('[MIC] Background request failed:', e));
             }
 
             // Fetch TURN credentials
@@ -828,10 +828,30 @@
                 audioTrack.enabled = false;
                 micPermissionGranted = true;
                 micRetryCount = 0;
-                pttBtn.classList.remove('no-mic', 'disabled');
+                pttBtn.classList.remove('no-mic');
+                // Only enable PTT button if connected
+                if (currentState === State.CONNECTED) {
+                    pttBtn.classList.remove('disabled');
+                }
                 micState.textContent = 'Ready';
                 micState.style.cursor = 'default';
                 console.log('[MIC] Permission granted:', audioTrack.label);
+
+                // Add track to existing peer connection if available
+                if (pc && pc.connectionState === 'connected') {
+                    try {
+                        // Check if track already added
+                        const senders = pc.getSenders();
+                        const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
+                        if (!audioSender) {
+                            console.log('[MIC] Adding audio track to existing peer connection');
+                            pc.addTrack(audioTrack, localStream);
+                        }
+                    } catch (e) {
+                        console.log('[MIC] Failed to add track to existing connection:', e.message);
+                    }
+                }
+
                 return true;
             }
 
