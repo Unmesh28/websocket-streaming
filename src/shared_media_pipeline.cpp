@@ -171,8 +171,8 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
         video_source +
         "x264enc name=video_encoder tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 bframes=0 ! "
         "video/x-h264,profile=constrained-baseline ! "
-        "h264parse config-interval=-1 ! "
-        "rtph264pay config-interval=-1 pt=96 aggregate-mode=zero-latency ! "
+        "h264parse config-interval=1 ! "
+        "rtph264pay config-interval=1 pt=96 aggregate-mode=zero-latency ! "
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
         "tee name=video_tee allow-not-linked=true "
         // Add a fakesink branch to ensure data always flows
