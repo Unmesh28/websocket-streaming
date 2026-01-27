@@ -107,6 +107,8 @@ SharedMediaPipeline::SharedMediaPipeline()
     , video_tee_(nullptr)
     , audio_tee_(nullptr)
     , video_encoder_(nullptr)
+    , audio_mixer_(nullptr)
+    , audio_sink_(nullptr)
     , is_running_(false) {
     LOG("SHARED", "SharedMediaPipeline created");
 }
@@ -242,6 +244,32 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
         LOG("SHARED", "Added audio buffer probe on tee sink");
     }
 
+    // Create audio mixer for incoming audio from viewers (browser → Pi)
+    LOG("SHARED", "Creating audio mixer for incoming viewer audio...");
+    audio_mixer_ = gst_element_factory_make("audiomixer", "viewer_audio_mixer");
+    audio_sink_ = gst_element_factory_make("alsasink", "speaker_output");
+
+    if (!audio_mixer_ || !audio_sink_) {
+        LOG("SHARED-WARN", "Failed to create audio mixer/sink - incoming audio will not work");
+    } else {
+        // Configure audio sink
+        g_object_set(audio_sink_,
+                     "device", audio_device.c_str(),
+                     "sync", FALSE,  // Don't sync to clock to reduce latency
+                     "async", FALSE,
+                     nullptr);
+
+        // Add mixer and sink to pipeline
+        gst_bin_add_many(GST_BIN(pipeline_), audio_mixer_, audio_sink_, nullptr);
+
+        // Link mixer → sink
+        if (!gst_element_link(audio_mixer_, audio_sink_)) {
+            LOG("SHARED-ERROR", "Failed to link audio mixer to sink");
+        } else {
+            LOG("SHARED", "Audio mixer and sink created successfully");
+        }
+    }
+
     LOG("SHARED", "Shared pipeline created successfully with tee elements");
     return true;
 }
@@ -358,6 +386,11 @@ WebRTCPeer* SharedMediaPipeline::addViewer(const std::string& viewer_id) {
     LOG("SHARED", "Creating new WebRTCPeer for: " << viewer_id);
     WebRTCPeer* peer = new WebRTCPeer(viewer_id, pipeline_, video_tee_, audio_tee_);
 
+    // Set audio mixer for incoming audio
+    if (audio_mixer_) {
+        peer->setAudioMixer(audio_mixer_);
+    }
+
     LOG("SHARED", "Calling peer->initialize() for: " << viewer_id);
     if (!peer->initialize()) {
         LOG_VAR("SHARED-ERROR", "Failed to initialize peer: ", viewer_id);
@@ -466,12 +499,18 @@ WebRTCPeer::WebRTCPeer(const std::string& viewer_id, GstElement* pipeline,
     , audio_tee_pad_(nullptr)
     , webrtc_video_sink_(nullptr)
     , webrtc_audio_sink_(nullptr)
+    , incoming_depay_(nullptr)
+    , incoming_decoder_(nullptr)
+    , incoming_convert_(nullptr)
+    , incoming_resample_(nullptr)
+    , mixer_sink_pad_(nullptr)
     , video_tee_probe_id_(0)
     , video_queue_sink_probe_id_(0)
     , video_queue_src_probe_id_(0)
     , cleaned_up_(false)
     , cleanup_removing_(0)
-    , remote_description_set_(false) {
+    , remote_description_set_(false)
+    , audio_mixer_ref_(nullptr) {
     LOG_VAR("PEER", "WebRTCPeer created: ", viewer_id);
 }
 
@@ -760,6 +799,11 @@ bool WebRTCPeer::initialize() {
     g_signal_connect(webrtcbin_, "notify::ice-gathering-state",
                     G_CALLBACK(onIceGatheringStateChange), this);
 
+    // BIDIRECTIONAL AUDIO: Connect pad-added signal to handle incoming audio from browser
+    g_signal_connect(webrtcbin_, "pad-added",
+                    G_CALLBACK(onIncomingStream), this);
+    LOG("PEER", "Registered pad-added callback for incoming audio");
+
     LOG_VAR("PEER", "Peer initialized successfully: ", viewer_id_);
     return true;
 }
@@ -936,6 +980,52 @@ void WebRTCPeer::doCleanupInProbe(bool is_video) {
         gst_object_unref(webrtc_audio_sink_);
         webrtc_audio_sink_ = nullptr;
     }
+
+    // Clean up incoming audio elements (bidirectional audio)
+    if (mixer_sink_pad_ && audio_mixer_ref_) {
+        LOG("PEER", "Releasing mixer sink pad...");
+        gst_element_release_request_pad(audio_mixer_ref_, mixer_sink_pad_);
+        gst_object_unref(mixer_sink_pad_);
+        mixer_sink_pad_ = nullptr;
+    }
+
+    if (incoming_resample_ && GST_IS_ELEMENT(incoming_resample_)) {
+        gst_element_set_state(incoming_resample_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(incoming_resample_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), incoming_resample_);
+        }
+        incoming_resample_ = nullptr;
+    }
+
+    if (incoming_convert_ && GST_IS_ELEMENT(incoming_convert_)) {
+        gst_element_set_state(incoming_convert_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(incoming_convert_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), incoming_convert_);
+        }
+        incoming_convert_ = nullptr;
+    }
+
+    if (incoming_decoder_ && GST_IS_ELEMENT(incoming_decoder_)) {
+        gst_element_set_state(incoming_decoder_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(incoming_decoder_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), incoming_decoder_);
+        }
+        incoming_decoder_ = nullptr;
+    }
+
+    if (incoming_depay_ && GST_IS_ELEMENT(incoming_depay_)) {
+        gst_element_set_state(incoming_depay_, GST_STATE_NULL);
+        GstElement* parent = GST_ELEMENT_PARENT(incoming_depay_);
+        if (parent == pipeline_) {
+            gst_bin_remove(GST_BIN(pipeline_), incoming_depay_);
+        }
+        incoming_depay_ = nullptr;
+    }
+
+    LOG("PEER", "Incoming audio cleanup complete");
 
     // STEP 5: Remove elements from pipeline bin - DOWNSTREAM FIRST
     LOG("PEER", "Removing elements from pipeline...");
@@ -1366,4 +1456,162 @@ void WebRTCPeer::onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec
 void WebRTCPeer::setIceCandidateCallback(
     std::function<void(const std::string&, int)> callback) {
     ice_candidate_callback_ = callback;
+}
+
+void WebRTCPeer::setAudioMixer(GstElement* mixer) {
+    audio_mixer_ref_ = mixer;
+    LOG_VAR("PEER", "Audio mixer set for: ", viewer_id_);
+}
+
+// Callback when webrtcbin adds a new pad (incoming stream from browser)
+void WebRTCPeer::onIncomingStream(GstElement* webrtc, GstPad* pad, gpointer user_data) {
+    WebRTCPeer* peer = static_cast<WebRTCPeer*>(user_data);
+
+    gchar* pad_name = gst_pad_get_name(pad);
+    LOG("INCOMING", peer->viewer_id_ << " - New pad added: " << pad_name);
+
+    // Get pad direction and caps
+    GstPadDirection direction = gst_pad_get_direction(pad);
+    LOG("INCOMING", peer->viewer_id_ << " - Pad direction: " <<
+        (direction == GST_PAD_SRC ? "SRC (incoming)" :
+         direction == GST_PAD_SINK ? "SINK (outgoing)" : "UNKNOWN"));
+
+    // We only care about SRC pads (incoming data from browser)
+    if (direction != GST_PAD_SRC) {
+        LOG("INCOMING", peer->viewer_id_ << " - Ignoring non-SRC pad");
+        g_free(pad_name);
+        return;
+    }
+
+    // Get caps to determine media type
+    GstCaps* caps = gst_pad_get_current_caps(pad);
+    if (!caps) {
+        // Caps might not be available yet, try query
+        caps = gst_pad_query_caps(pad, nullptr);
+    }
+
+    if (caps) {
+        gchar* caps_str = gst_caps_to_string(caps);
+        LOG("INCOMING", peer->viewer_id_ << " - Pad caps: " << caps_str);
+
+        // Check if this is an audio pad
+        GstStructure* structure = gst_caps_get_structure(caps, 0);
+        const gchar* media_type = gst_structure_get_string(structure, "media");
+
+        if (media_type && g_strcmp0(media_type, "audio") == 0) {
+            LOG("INCOMING", peer->viewer_id_ << " - *** INCOMING AUDIO DETECTED from browser ***");
+
+            if (!peer->audio_mixer_ref_) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - No audio mixer available!");
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            // Create receive pipeline: rtpopusdepay → opusdec → audioconvert → audioresample → mixer
+            std::string depay_name = "depay_" + peer->viewer_id_;
+            std::string decoder_name = "decoder_" + peer->viewer_id_;
+            std::string convert_name = "convert_" + peer->viewer_id_;
+            std::string resample_name = "resample_" + peer->viewer_id_;
+
+            peer->incoming_depay_ = gst_element_factory_make("rtpopusdepay", depay_name.c_str());
+            peer->incoming_decoder_ = gst_element_factory_make("opusdec", decoder_name.c_str());
+            peer->incoming_convert_ = gst_element_factory_make("audioconvert", convert_name.c_str());
+            peer->incoming_resample_ = gst_element_factory_make("audioresample", resample_name.c_str());
+
+            if (!peer->incoming_depay_ || !peer->incoming_decoder_ ||
+                !peer->incoming_convert_ || !peer->incoming_resample_) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - Failed to create incoming audio elements");
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            LOG("INCOMING", peer->viewer_id_ << " - Created incoming audio pipeline elements");
+
+            // Add elements to pipeline
+            gst_bin_add_many(GST_BIN(peer->pipeline_),
+                           peer->incoming_depay_,
+                           peer->incoming_decoder_,
+                           peer->incoming_convert_,
+                           peer->incoming_resample_,
+                           nullptr);
+
+            // Link elements: depay → decoder → convert → resample
+            if (!gst_element_link_many(peer->incoming_depay_,
+                                       peer->incoming_decoder_,
+                                       peer->incoming_convert_,
+                                       peer->incoming_resample_,
+                                       nullptr)) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - Failed to link incoming audio elements");
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            LOG("INCOMING", peer->viewer_id_ << " - Linked incoming audio pipeline");
+
+            // Get mixer sink pad for this peer
+            peer->mixer_sink_pad_ = gst_element_request_pad_simple(peer->audio_mixer_ref_, "sink_%u");
+            if (!peer->mixer_sink_pad_) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - Failed to get mixer sink pad");
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            LOG("INCOMING", peer->viewer_id_ << " - Got mixer sink pad: " << GST_PAD_NAME(peer->mixer_sink_pad_));
+
+            // Link resample → mixer
+            GstPad* resample_src = gst_element_get_static_pad(peer->incoming_resample_, "src");
+            GstPadLinkReturn link_result = gst_pad_link(resample_src, peer->mixer_sink_pad_);
+            gst_object_unref(resample_src);
+
+            if (link_result != GST_PAD_LINK_OK) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - Failed to link to mixer, result: " << link_result);
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            LOG("INCOMING", peer->viewer_id_ << " - Linked resample → mixer");
+
+            // Sync all new elements to pipeline state
+            gst_element_sync_state_with_parent(peer->incoming_depay_);
+            gst_element_sync_state_with_parent(peer->incoming_decoder_);
+            gst_element_sync_state_with_parent(peer->incoming_convert_);
+            gst_element_sync_state_with_parent(peer->incoming_resample_);
+
+            // Link incoming pad from webrtcbin to depay
+            GstPad* depay_sink = gst_element_get_static_pad(peer->incoming_depay_, "sink");
+            link_result = gst_pad_link(pad, depay_sink);
+            gst_object_unref(depay_sink);
+
+            if (link_result != GST_PAD_LINK_OK) {
+                LOG("INCOMING-ERROR", peer->viewer_id_ << " - Failed to link webrtcbin to depay, result: " << link_result);
+                g_free(caps_str);
+                gst_caps_unref(caps);
+                g_free(pad_name);
+                return;
+            }
+
+            LOG("INCOMING", peer->viewer_id_ << " - *** INCOMING AUDIO PIPELINE COMPLETE ***");
+            LOG("INCOMING", peer->viewer_id_ << " - Audio from browser will now play on Pi");
+        } else {
+            LOG("INCOMING", peer->viewer_id_ << " - Not an audio pad, media=" <<
+                (media_type ? media_type : "null"));
+        }
+
+        g_free(caps_str);
+        gst_caps_unref(caps);
+    } else {
+        LOG("INCOMING-WARN", peer->viewer_id_ << " - Could not get caps for pad");
+    }
+
+    g_free(pad_name);
 }

@@ -103,6 +103,25 @@
             background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
         }
 
+        .btn-ptt {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+            min-width: 200px;
+            position: relative;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+
+        .btn-ptt.active {
+            background: linear-gradient(135deg, #51cf66 0%, #37b24d 100%);
+            box-shadow: 0 0 20px rgba(81, 207, 102, 0.6);
+            transform: scale(1.05);
+        }
+
+        .btn-ptt:disabled {
+            background: linear-gradient(135deg, #868e96 0%, #495057 100%);
+        }
+
         button:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(0,0,0,0.3);
@@ -205,6 +224,7 @@
                 <button class="btn-connect" id="connectBtn" onclick="connectToStream()">▶️ Connect</button>
                 <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>⏹️ Disconnect</button>
                 <button class="btn-refresh" id="refreshBtn" onclick="refresh()" disabled>🔄 Refresh</button>
+                <button class="btn-ptt" id="pttBtn" disabled>🎤 Hold to Talk</button>
             </div>
         </div>
 
@@ -236,6 +256,10 @@
                 <span class="status-label">ICE State:</span>
                 <span id="iceState" class="status-value">-</span>
             </div>
+            <div class="status-item">
+                <span class="status-label">Microphone:</span>
+                <span id="micStatus" class="status-value status-disconnected">Not Ready</span>
+            </div>
         </div>
 
         <div class="info-box">
@@ -246,6 +270,7 @@
                 <li>Enter the stream ID (default: pi-camera-stream)</li>
                 <li>Enter signaling server URL (use ngrok URL if remote)</li>
                 <li>Click "Connect" to start viewing</li>
+                <li><strong>🎤 Push-to-Talk:</strong> Hold down the "Hold to Talk" button to speak to the Pi (microphone permission required)</li>
             </ul>
         </div>
 
@@ -304,15 +329,23 @@
         let isDisconnecting = false; // Disconnect guard
         let connectionTimeout = null; // Connection timeout timer
 
+        // Microphone variables for bidirectional audio
+        let micStream = null;
+        let micTrack = null;
+        let audioSender = null; // RTP sender for audio track
+        let isTalking = false; // PTT button state
+
         const video = document.getElementById('video');
         const statusEl = document.getElementById('status');
         const currentStreamEl = document.getElementById('currentStream');
         const connectionStateEl = document.getElementById('connectionState');
         const iceStateEl = document.getElementById('iceState');
+        const micStatusEl = document.getElementById('micStatus');
         const errorBox = document.getElementById('errorBox');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
         const refreshBtn = document.getElementById('refreshBtn');
+        const pttBtn = document.getElementById('pttBtn');
 
         // Add video element event listeners for debugging
         video.addEventListener('loadstart', () => log('VIDEO-EVENT', 'loadstart'));
@@ -357,6 +390,109 @@
                 errorBox.style.display = 'none';
             }, 5000);
         }
+
+        // ==================== MICROPHONE FUNCTIONS ====================
+        async function requestMicrophonePermission() {
+            log('MIC', 'Requesting microphone permission...');
+            try {
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+                micTrack = micStream.getAudioTracks()[0];
+                micTrack.enabled = false; // Start muted
+
+                log('MIC', `Microphone ready: ${micTrack.label}`);
+                micStatusEl.textContent = 'Ready';
+                micStatusEl.className = 'status-value status-connected';
+                pttBtn.disabled = false;
+                return true;
+            } catch (error) {
+                log('MIC', `Failed to get microphone: ${error.message}`);
+                micStatusEl.textContent = 'Permission Denied';
+                micStatusEl.className = 'status-value status-disconnected';
+                showError(`Microphone access denied: ${error.message}`);
+                return false;
+            }
+        }
+
+        function startTalking() {
+            if (!micTrack || !pc || isTalking) return;
+
+            log('PTT', 'Starting to talk...');
+            isTalking = true;
+            pttBtn.classList.add('active');
+            pttBtn.textContent = '🎤 Talking...';
+
+            try {
+                // Enable the microphone track
+                micTrack.enabled = true;
+
+                // Add track to peer connection if not already added
+                if (!audioSender) {
+                    log('PTT', 'Adding audio track to peer connection');
+                    audioSender = pc.addTrack(micTrack, micStream);
+                    log('PTT', 'Audio track added, renegotiation will occur automatically');
+                } else {
+                    log('PTT', 'Audio track already added, just enabled');
+                }
+            } catch (error) {
+                log('PTT', `Error starting to talk: ${error.message}`);
+                showError(`Failed to start talking: ${error.message}`);
+                stopTalking();
+            }
+        }
+
+        function stopTalking() {
+            if (!micTrack || !isTalking) return;
+
+            log('PTT', 'Stopping talk...');
+            isTalking = false;
+            pttBtn.classList.remove('active');
+            pttBtn.textContent = '🎤 Hold to Talk';
+
+            // Disable the microphone track (but keep it in the peer connection)
+            micTrack.enabled = false;
+            log('PTT', 'Microphone muted');
+        }
+
+        // PTT button event handlers
+        pttBtn.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startTalking();
+        });
+
+        pttBtn.addEventListener('mouseup', (e) => {
+            e.preventDefault();
+            stopTalking();
+        });
+
+        pttBtn.addEventListener('mouseleave', (e) => {
+            // If user drags mouse off button while holding, stop talking
+            if (isTalking) {
+                stopTalking();
+            }
+        });
+
+        // Touch support for mobile devices
+        pttBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startTalking();
+        });
+
+        pttBtn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            stopTalking();
+        });
+
+        pttBtn.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            stopTalking();
+        });
+        // ==================== END MICROPHONE FUNCTIONS ====================
 
         async function connectToStream() {
             // Connection guard - prevent multiple simultaneous connection attempts
@@ -407,6 +543,11 @@
                 } catch (e) {
                     log('TURN', `TURN fetch error: ${e.message}, using STUN only`);
                     iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+                }
+
+                // Request microphone permission
+                if (!micStream) {
+                    await requestMicrophonePermission();
                 }
 
                 // Connect to signaling server
@@ -654,6 +795,14 @@
                 connectionTimeout = null;
             }
 
+            // Stop talking if currently talking
+            if (isTalking) {
+                stopTalking();
+            }
+
+            // Reset audio sender
+            audioSender = null;
+
             if (pc) {
                 log('CLEANUP', 'Closing peer connection');
                 pc.ontrack = null;
@@ -685,6 +834,9 @@
                 video.srcObject = null;
             }
 
+            // Note: We keep micStream/micTrack active for reconnection
+            // Only stop them on full page unload
+
             viewerId = null;
             log('CLEANUP', 'Cleanup complete');
 
@@ -703,6 +855,7 @@
 
             connectBtn.disabled = true;
             disconnectBtn.disabled = true;
+            pttBtn.disabled = true;
 
             await cleanupConnection();
 
@@ -714,6 +867,7 @@
             connectBtn.disabled = false;
             disconnectBtn.disabled = true;
             refreshBtn.disabled = true;
+            pttBtn.disabled = !micStream; // Re-enable if mic is ready
             isDisconnecting = false;
             isConnecting = false; // Reset in case it was stuck
             log('DISCONNECT', 'Disconnected');
@@ -745,7 +899,16 @@
         }
 
         // Auto-cleanup on page unload
-        window.addEventListener('beforeunload', disconnect);
+        window.addEventListener('beforeunload', () => {
+            disconnect();
+            // Stop microphone stream
+            if (micStream) {
+                log('CLEANUP', 'Stopping microphone stream on page unload');
+                micStream.getTracks().forEach(track => track.stop());
+                micStream = null;
+                micTrack = null;
+            }
+        });
 
         log('INIT', 'Viewer loaded and ready');
         log('INIT', 'User Agent: ' + navigator.userAgent);

@@ -55,6 +55,8 @@ private:
     GstElement* video_tee_;
     GstElement* audio_tee_;
     GstElement* video_encoder_;
+    GstElement* audio_mixer_;      // Mixer for incoming audio from viewers
+    GstElement* audio_sink_;       // Speaker output for mixed audio
     bool is_running_;
     std::mutex mutex_;
 
@@ -126,6 +128,13 @@ private:
     GstPad* webrtc_video_sink_;     // Sink pad on webrtcbin for video
     GstPad* webrtc_audio_sink_;     // Sink pad on webrtcbin for audio
 
+    // Incoming audio elements (browser → Pi)
+    GstElement* incoming_depay_;     // RTP depayloader for incoming audio
+    GstElement* incoming_decoder_;   // Opus decoder for incoming audio
+    GstElement* incoming_convert_;   // Audio converter
+    GstElement* incoming_resample_;  // Audio resampler
+    GstPad* mixer_sink_pad_;         // Pad on audio mixer for this peer
+
     // Probe IDs for cleanup
     gulong video_tee_probe_id_;
     gulong video_queue_sink_probe_id_;
@@ -178,6 +187,14 @@ private:
     static void onIceConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
     static void onConnectionStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
     static void onIceGatheringStateChange(GstElement* webrtc, GParamSpec* pspec, gpointer user_data);
+    static void onIncomingStream(GstElement* webrtc, GstPad* pad, gpointer user_data);
+
+public:
+    // Get audio mixer from shared pipeline (needed for incoming audio)
+    void setAudioMixer(GstElement* mixer);
+
+private:
+    GstElement* audio_mixer_ref_;  // Reference to shared audio mixer
 };
 
 #endif // SHARED_MEDIA_PIPELINE_H
