@@ -40,8 +40,12 @@ app.use(express.static(path.join(__dirname, '../web')));
 
 // Store connections
 const broadcasters = new Map(); // streamId -> { ws, viewers: Set }
-const viewers = new Map();       // viewerId -> { ws, streamId, broadcasterId }
+const viewers = new Map();       // viewerId -> { ws, streamId, broadcasterId, ready: boolean }
 const connections = new Map();   // ws -> { clientId, clientRole }
+
+// Buffer for pending offers when viewer isn't ready yet
+const pendingOffers = new Map(); // viewerId -> { sdp, timestamp }
+const PENDING_OFFER_TIMEOUT = 10000; // 10 seconds
 
 let nextViewerId = 1;
 
@@ -83,6 +87,10 @@ wss.on('connection', (ws, req) => {
                     handleIceCandidate(ws, data);
                     break;
 
+                case 'viewer-ready':
+                    handleViewerReady(ws, data);
+                    break;
+
                 default:
                     console.log(`[WARN] Unknown message type: ${data.type}`);
             }
@@ -117,8 +125,20 @@ const pingInterval = setInterval(() => {
     });
 }, 30000);
 
+// Clean up stale pending offers every 30 seconds
+const pendingOfferCleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [viewerId, offer] of pendingOffers.entries()) {
+        if (now - offer.timestamp > PENDING_OFFER_TIMEOUT) {
+            console.log(`[CLEANUP] Removing stale pending offer for ${viewerId}`);
+            pendingOffers.delete(viewerId);
+        }
+    }
+}, 30000);
+
 wss.on('close', () => {
     clearInterval(pingInterval);
+    clearInterval(pendingOfferCleanupInterval);
 });
 
 function handleRegister(ws, data) {
@@ -219,29 +239,41 @@ function handleJoin(ws, data) {
     viewers.set(viewerId, {
         ws: ws,
         streamId: streamId,
-        broadcasterId: streamId
+        broadcasterId: streamId,
+        ready: false  // Will be set to true when viewer sends 'viewer-ready' message
     });
 
     console.log(`[JOIN] Viewer ${viewerId} joined stream: ${streamId} (total viewers: ${broadcaster.viewers.size})`);
     logStatus();
 
-    // Notify broadcaster
-    try {
-        broadcaster.ws.send(JSON.stringify({
-            type: 'viewer-joined',
-            viewer_id: viewerId
-        }));
-        console.log(`[JOIN] Notified broadcaster about ${viewerId}`);
-    } catch (e) {
-        console.error(`[JOIN] Failed to notify broadcaster:`, e);
-    }
-
-    // Confirm to viewer
+    // Confirm to viewer first (so they can send viewer-ready)
     ws.send(JSON.stringify({
         type: 'joined',
         viewer_id: viewerId,
         stream_id: streamId
     }));
+
+    // Delay broadcaster notification slightly to allow viewer to send viewer-ready
+    // This helps prevent the race condition where offer is sent before viewer is ready
+    setTimeout(() => {
+        // Re-check viewer is still connected
+        const currentViewer = viewers.get(viewerId);
+        if (!currentViewer || currentViewer.ws.readyState !== WebSocket.OPEN) {
+            console.log(`[JOIN] Viewer ${viewerId} disconnected before broadcaster notification`);
+            return;
+        }
+
+        // Notify broadcaster
+        try {
+            broadcaster.ws.send(JSON.stringify({
+                type: 'viewer-joined',
+                viewer_id: viewerId
+            }));
+            console.log(`[JOIN] Notified broadcaster about ${viewerId}`);
+        } catch (e) {
+            console.error(`[JOIN] Failed to notify broadcaster:`, e);
+        }
+    }, 100); // 100ms delay
 }
 
 function handleOffer(ws, data) {
@@ -249,7 +281,14 @@ function handleOffer(ws, data) {
     const viewer = viewers.get(viewerId);
 
     if (viewer) {
-        console.log(`[OFFER] Forwarding offer to ${viewerId}`);
+        // Check if viewer WebSocket is still open
+        if (viewer.ws.readyState !== WebSocket.OPEN) {
+            console.log(`[OFFER] Viewer ${viewerId} WebSocket not open, buffering offer`);
+            pendingOffers.set(viewerId, { sdp: data.sdp, timestamp: Date.now() });
+            return;
+        }
+
+        console.log(`[OFFER] Forwarding offer to ${viewerId} (ready: ${viewer.ready})`);
         try {
             viewer.ws.send(JSON.stringify({
                 type: 'offer',
@@ -257,10 +296,47 @@ function handleOffer(ws, data) {
                 sdp: data.sdp
             }));
         } catch (e) {
-            console.error(`[OFFER] Failed to forward:`, e);
+            console.error(`[OFFER] Failed to forward, buffering:`, e);
+            pendingOffers.set(viewerId, { sdp: data.sdp, timestamp: Date.now() });
         }
     } else {
-        console.log(`[OFFER] Viewer not found: ${viewerId}`);
+        console.log(`[OFFER] Viewer not found: ${viewerId}, buffering offer`);
+        pendingOffers.set(viewerId, { sdp: data.sdp, timestamp: Date.now() });
+    }
+}
+
+function handleViewerReady(ws, data) {
+    const connInfo = connections.get(ws);
+    if (!connInfo || connInfo.clientRole !== 'viewer') {
+        console.log('[VIEWER-READY] Not a viewer connection');
+        return;
+    }
+
+    const viewerId = connInfo.clientId;
+    const viewer = viewers.get(viewerId);
+
+    if (!viewer) {
+        console.log(`[VIEWER-READY] Viewer not found: ${viewerId}`);
+        return;
+    }
+
+    viewer.ready = true;
+    console.log(`[VIEWER-READY] Viewer ${viewerId} is ready`);
+
+    // Check if there's a pending offer for this viewer
+    const pendingOffer = pendingOffers.get(viewerId);
+    if (pendingOffer) {
+        console.log(`[VIEWER-READY] Sending buffered offer to ${viewerId}`);
+        try {
+            viewer.ws.send(JSON.stringify({
+                type: 'offer',
+                from: viewer.broadcasterId,
+                sdp: pendingOffer.sdp
+            }));
+            pendingOffers.delete(viewerId);
+        } catch (e) {
+            console.error(`[VIEWER-READY] Failed to send buffered offer:`, e);
+        }
     }
 }
 
@@ -376,6 +452,7 @@ function handleDisconnect(ws) {
             }
 
             viewers.delete(clientId);
+            pendingOffers.delete(clientId); // Clean up any pending offers
         }
     }
 

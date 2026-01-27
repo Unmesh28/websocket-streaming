@@ -151,8 +151,8 @@ class WebRTCService extends ChangeNotifier {
       _send(joinMsg);
       _updateState(StreamState.connecting, 'Joining stream...');
 
-      // Wait for connection with timeout
-      final connected = await _waitForConnection(timeout: const Duration(seconds: 15));
+      // Wait for connection with timeout (30 seconds to allow for slow offer creation)
+      final connected = await _waitForConnection(timeout: const Duration(seconds: 30));
       return connected;
 
     } catch (e) {
@@ -292,6 +292,10 @@ class WebRTCService extends ChangeNotifier {
     _broadcasterId = data['stream_id'] as String?;
     debugPrint('[WebRTC] Joined as $_viewerId, broadcaster: $_broadcasterId');
     _updateState(StreamState.connecting, 'Waiting for stream...');
+
+    // Send viewer-ready to signal we're ready to receive offers
+    _send({'type': 'viewer-ready'});
+    debugPrint('[WebRTC] Sent viewer-ready signal');
   }
 
   void _handleError(Map<String, dynamic> data) {

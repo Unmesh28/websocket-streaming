@@ -412,15 +412,15 @@
                 // Connect to signaling server
                 ws = new WebSocket(serverUrl);
 
-                // Set connection timeout (15 seconds)
+                // Set connection timeout (30 seconds - increased to allow for slow offer creation)
                 connectionTimeout = setTimeout(() => {
                     if (isConnecting) {
-                        log('TIMEOUT', 'Connection timeout - no video after 15 seconds');
+                        log('TIMEOUT', 'Connection timeout - no video after 30 seconds');
                         showError('Connection timeout - please try again');
                         isConnecting = false;
                         disconnect();
                     }
-                }, 15000);
+                }, 30000);
 
                 ws.onopen = () => {
                     log('WEBSOCKET', 'Connected to signaling server');
@@ -440,6 +440,9 @@
                             viewerId = data.viewer_id;
                             currentStreamEl.textContent = data.stream_id;
                             log('WEBSOCKET', `Joined as viewer: ${viewerId}`);
+                            // Send viewer-ready to signal we're ready to receive offers
+                            ws.send(JSON.stringify({ type: 'viewer-ready' }));
+                            log('WEBSOCKET', 'Sent viewer-ready signal');
                             break;
 
                         case 'offer':
