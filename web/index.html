@@ -231,6 +231,9 @@
         let micReady = false;
         let isTalking = false;
 
+        // Playback state
+        let isPlayPending = false;
+
         // DOM elements
         const video = document.getElementById('video');
         const statusDot = document.getElementById('statusDot');
@@ -399,6 +402,8 @@
         function cleanup(keepMic = false) {
             log('CLEANUP', 'Cleaning up, keepMic=' + keepMic);
 
+            isPlayPending = false;
+
             if (pc) {
                 pc.ontrack = null;
                 pc.onicecandidate = null;
@@ -465,16 +470,13 @@
                 log('TRACK', 'Received ' + event.track.kind + ' track');
 
                 if (event.track.kind === 'video' && event.streams[0]) {
-                    video.srcObject = event.streams[0];
+                    const stream = event.streams[0];
 
-                    // Try to play
-                    video.play().then(() => {
-                        log('VIDEO', 'Playing');
-                    }).catch(err => {
-                        log('VIDEO', 'Play error, trying muted: ' + err.name);
-                        video.muted = true;
-                        video.play().catch(e => log('VIDEO', 'Muted play failed: ' + e.name));
-                    });
+                    // Only set srcObject if different
+                    if (video.srcObject !== stream) {
+                        log('TRACK', 'Setting video srcObject');
+                        video.srcObject = stream;
+                    }
 
                     // Mark connected
                     isConnected = true;
@@ -482,6 +484,36 @@
                     setStatus('Connected', 'green');
                     updateButtons(true);
                     hideOverlay();
+
+                    // Try to play with delay to avoid race conditions
+                    if (!isPlayPending && video.paused) {
+                        isPlayPending = true;
+                        const currentStream = stream;
+
+                        setTimeout(() => {
+                            // Check if stream changed or peer connection closed
+                            if (!pc || video.srcObject !== currentStream) {
+                                log('VIDEO', 'Play cancelled, stream changed');
+                                isPlayPending = false;
+                                return;
+                            }
+
+                            video.play().then(() => {
+                                log('VIDEO', 'Playing');
+                                isPlayPending = false;
+                            }).catch(err => {
+                                log('VIDEO', 'Play error, trying muted: ' + err.name);
+                                video.muted = true;
+                                video.play().then(() => {
+                                    log('VIDEO', 'Playing muted');
+                                    isPlayPending = false;
+                                }).catch(e => {
+                                    log('VIDEO', 'Muted play failed: ' + e.name);
+                                    isPlayPending = false;
+                                });
+                            });
+                        }, 100);
+                    }
                 }
             };
 
