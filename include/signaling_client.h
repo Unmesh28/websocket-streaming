@@ -10,7 +10,7 @@
 #include <websocketpp/client.hpp>
 #include <json/json.h>
 
-typedef websocketpp::client<websocketpp::config::asio_tls_client> WSClient;
+typedef websocketpp::client<websocketpp::config::asio_client> WSClient;
 typedef websocketpp::connection_hdl ConnectionHdl;
 
 class SignalingClient {
@@ -61,9 +61,6 @@ private:
     // Message handling
     void handleMessage(const std::string& message);
     void sendMessage(const Json::Value& message);
-    
-    // TLS context
-    std::shared_ptr<boost::asio::ssl::context> onTlsInit(ConnectionHdl hdl);
 };
 
 #endif // SIGNALING_CLIENT_H

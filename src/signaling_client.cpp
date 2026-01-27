@@ -21,7 +21,6 @@ SignalingClient::SignalingClient(const std::string& server_url)
         onMessage(hdl, msg);
     });
     client_.set_fail_handler([this](ConnectionHdl hdl) { onFail(hdl); });
-    client_.set_tls_init_handler([this](ConnectionHdl hdl) { return onTlsInit(hdl); });
 }
 
 SignalingClient::~SignalingClient() {
@@ -190,21 +189,4 @@ void SignalingClient::sendMessage(const Json::Value& message) {
     } catch (const std::exception& e) {
         std::cerr << "Send error: " << e.what() << std::endl;
     }
-}
-
-std::shared_ptr<boost::asio::ssl::context> SignalingClient::onTlsInit(ConnectionHdl hdl) {
-    auto ctx = std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12);
-    
-    try {
-        ctx->set_options(boost::asio::ssl::context::default_workarounds |
-                        boost::asio::ssl::context::no_sslv2 |
-                        boost::asio::ssl::context::no_sslv3 |
-                        boost::asio::ssl::context::single_dh_use);
-        
-        ctx->set_verify_mode(boost::asio::ssl::verify_none);
-    } catch (const std::exception& e) {
-        std::cerr << "TLS init error: " << e.what() << std::endl;
-    }
-    
-    return ctx;
 }
