@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple WebRTC Test</title>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #222; color: white; }
+        video { width: 100%; max-width: 800px; background: black; }
+        .logs { background: #111; padding: 10px; margin-top: 20px; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: scroll; }
+        button { padding: 10px 20px; margin: 10px 5px; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <h1>Simple WebRTC Stream Test</h1>
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <br><br>
+    <video id="video" autoplay playsinline controls muted></video>
+    <div class="logs" id="logs"></div>
+
+    <script>
+        const video = document.getElementById('video');
+        const logsDiv = document.getElementById('logs');
+        const connectBtn = document.getElementById('connect');
+        const disconnectBtn = document.getElementById('disconnect');
+
+        let ws = null;
+        let pc = null;
+
+        function log(msg) {
+            const time = new Date().toLocaleTimeString();
+            console.log(`[${time}] ${msg}`);
+            logsDiv.innerHTML += `[${time}] ${msg}<br>`;
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        connectBtn.onclick = async () => {
+            try {
+                connectBtn.disabled = true;
+
+                // Get server URL from current location
+                const wsUrl = `ws://${window.location.hostname}:8080`;
+                log(`Connecting to ${wsUrl}...`);
+
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    log('WebSocket connected');
+                    // Join stream
+                    ws.send(JSON.stringify({
+                        type: 'join',
+                        stream_id: 'pi-camera-stream'
+                    }));
+                };
+
+                ws.onmessage = async (event) => {
+                    const msg = JSON.parse(event.data);
+                    log(`Received: ${msg.type}`);
+
+                    if (msg.type === 'offer') {
+                        log('Creating peer connection...');
+
+                        pc = new RTCPeerConnection({
+                            iceServers: [
+                                { urls: 'stun:stun.l.google.com:19302' },
+                                { urls: 'stun:stun.cloudflare.com:3478' }
+                            ]
+                        });
+
+                        pc.ontrack = (event) => {
+                            log(`Got ${event.track.kind} track`);
+                            if (event.track.kind === 'video') {
+                                video.srcObject = event.streams[0];
+                                log('Video srcObject set, attempting play...');
+                                video.play().then(() => {
+                                    log('Video playing!');
+                                    disconnectBtn.disabled = false;
+                                }).catch(e => log(`Play error: ${e.message}`));
+                            }
+                        };
+
+                        pc.onicecandidate = (event) => {
+                            if (event.candidate) {
+                                ws.send(JSON.stringify({
+                                    type: 'ice-candidate',
+                                    to: 'pi-camera-stream',
+                                    candidate: event.candidate.candidate,
+                                    sdpMLineIndex: event.candidate.sdpMLineIndex
+                                }));
+                            }
+                        };
+
+                        pc.onconnectionstatechange = () => {
+                            log(`Connection state: ${pc.connectionState}`);
+                        };
+
+                        pc.oniceconnectionstatechange = () => {
+                            log(`ICE state: ${pc.iceConnectionState}`);
+                        };
+
+                        // Set remote description (offer)
+                        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+                        log('Remote description set');
+
+                        // Create answer
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        log('Local description set');
+
+                        // Send answer
+                        ws.send(JSON.stringify({
+                            type: 'answer',
+                            to: 'pi-camera-stream',
+                            sdp: answer.sdp
+                        }));
+                        log('Answer sent');
+                    }
+                    else if (msg.type === 'ice-candidate') {
+                        if (pc && msg.candidate) {
+                            await pc.addIceCandidate({
+                                candidate: msg.candidate,
+                                sdpMLineIndex: msg.sdpMLineIndex
+                            });
+                        }
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    log('WebSocket error: ' + error);
+                    connectBtn.disabled = false;
+                };
+
+                ws.onclose = () => {
+                    log('WebSocket closed');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                };
+
+            } catch (error) {
+                log('Error: ' + error.message);
+                connectBtn.disabled = false;
+            }
+        };
+
+        disconnectBtn.onclick = () => {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+                video.srcObject = null;
+            }
+            disconnectBtn.disabled = true;
+            connectBtn.disabled = false;
+            log('Disconnected');
+        };
+    </script>
+</body>
+</html>
