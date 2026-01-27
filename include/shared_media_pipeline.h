@@ -16,8 +16,9 @@ class SharedMediaPipeline {
 public:
     // Camera types
     enum class CameraType {
-        CSI,    // Raspberry Pi Camera Module (CSI interface) - uses libcamerasrc
-        USB     // USB Webcam - uses v4l2src
+        CSI,         // Raspberry Pi Camera Module (CSI interface) - uses libcamerasrc (modern)
+        LEGACY_CSI,  // Raspberry Pi Camera Module (legacy) - uses rpicamsrc (old camera stack)
+        USB          // USB Webcam - uses v4l2src
     };
 
     SharedMediaPipeline();

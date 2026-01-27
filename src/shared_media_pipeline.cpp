@@ -138,10 +138,20 @@ bool SharedMediaPipeline::createPipeline(const std::string& video_device,
     std::string video_source;
 
     if (camera_type == CameraType::CSI) {
-        LOG("SHARED", "Using CSI camera (libcamerasrc) - Pi Camera Module");
+        LOG("SHARED", "Using CSI camera (libcamerasrc) - Pi Camera Module (modern)");
         video_source =
             "libcamerasrc ! "
             "video/x-raw,width=1280,height=720,framerate=30/1,format=NV12 ! "
+            "videoconvert ! "
+            "video/x-raw,format=I420 ! ";
+    } else if (camera_type == CameraType::LEGACY_CSI) {
+        LOG("SHARED", "Using CSI camera (rpicamsrc) - Pi Camera Module (legacy)");
+        video_source =
+            "rpicamsrc bitrate=2000000 preview=false ! "
+            "video/x-h264,width=1280,height=720,framerate=30/1,profile=constrained-baseline ! "
+            "h264parse ! "
+            "queue max-size-buffers=3 leaky=downstream ! "
+            "avdec_h264 ! "
             "videoconvert ! "
             "video/x-raw,format=I420 ! ";
     } else {

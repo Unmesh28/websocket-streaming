@@ -207,6 +207,18 @@ int main(int argc, char* argv[]) {
     std::string audio_device = "default";
     std::string camera_type_str = "csi";  // Default to CSI for Pi Camera Module
 
+    // Show usage if help requested
+    if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
+        std::cout << "Usage: " << argv[0] << " [signaling_url] [stream_id] [video_device] [audio_device] [camera_type]" << std::endl;
+        std::cout << "\nCamera types:" << std::endl;
+        std::cout << "  csi    - Modern Pi Camera (libcamera) - default" << std::endl;
+        std::cout << "  legacy - Legacy Pi Camera (rpicamsrc) - for old Raspberry Pi OS" << std::endl;
+        std::cout << "  usb    - USB webcam (v4l2)" << std::endl;
+        std::cout << "\nExample:" << std::endl;
+        std::cout << "  " << argv[0] << " ws://3.110.83.74:8080 pi-camera-stream /dev/video0 default legacy" << std::endl;
+        return 0;
+    }
+
     if (argc > 1) signaling_url = argv[1];
     if (argc > 2) stream_id = argv[2];
     if (argc > 3) video_device = argv[3];
@@ -217,11 +229,18 @@ int main(int argc, char* argv[]) {
     SharedMediaPipeline::CameraType camera_type = SharedMediaPipeline::CameraType::CSI;
     if (camera_type_str == "usb" || camera_type_str == "USB") {
         camera_type = SharedMediaPipeline::CameraType::USB;
+    } else if (camera_type_str == "legacy" || camera_type_str == "LEGACY") {
+        camera_type = SharedMediaPipeline::CameraType::LEGACY_CSI;
     }
 
-    std::string camera_display = (camera_type == SharedMediaPipeline::CameraType::CSI)
-        ? "CSI (Pi Camera Module)"
-        : "USB (" + video_device + ")";
+    std::string camera_display;
+    if (camera_type == SharedMediaPipeline::CameraType::CSI) {
+        camera_display = "CSI (Pi Camera Module - libcamera)";
+    } else if (camera_type == SharedMediaPipeline::CameraType::LEGACY_CSI) {
+        camera_display = "CSI (Pi Camera Module - legacy)";
+    } else {
+        camera_display = "USB (" + video_device + ")";
+    }
 
     // Check for TURN server configuration
     // Priority: 1. Cloudflare TURN (dynamic credentials)
