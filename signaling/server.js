@@ -48,11 +48,11 @@ function generateTurnCredentials() {
 }
 
 // Serve static files (HTML viewer)
-app.use(express.static(path.join(__dirname, '../web')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Root endpoint for testing server availability
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '../web/index.html'));
+    res.sendFile(path.join(__dirname, 'public/index.html'));
 });
 
 // Store connections
