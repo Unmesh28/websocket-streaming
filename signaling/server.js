@@ -5,6 +5,18 @@ const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
+
+// Enable CORS for all origins
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -36,7 +48,12 @@ function generateTurnCredentials() {
 }
 
 // Serve static files (HTML viewer)
-app.use(express.static(path.join(__dirname, '../web')));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Root endpoint for testing server availability
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public/index.html'));
+});
 
 // Store connections
 const broadcasters = new Map(); // streamId -> { ws, viewers: Set }
@@ -384,13 +401,15 @@ function handleDisconnect(ws) {
 }
 
 const PORT = process.env.PORT || 8080;
+const HOST = process.env.HOST || '0.0.0.0';
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
     console.log('\n========================================');
     console.log('  WebRTC Signaling Server (Enhanced)');
     console.log('========================================');
-    console.log(`HTTP server: http://localhost:${PORT}`);
-    console.log(`WebSocket:   ws://localhost:${PORT}`);
+    console.log(`HTTP server: http://${HOST}:${PORT}`);
+    console.log(`WebSocket:   ws://${HOST}:${PORT}`);
+    console.log(`Local:       http://localhost:${PORT}`);
     console.log('========================================\n');
     console.log('Waiting for connections...\n');
 });
