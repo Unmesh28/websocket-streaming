@@ -47,6 +47,12 @@
     <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
     <true/>
+    <!-- Microphone permission for Push-to-Talk feature -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>This app needs microphone access for the Push-to-Talk feature to send audio to your Raspberry Pi.</string>
+    <!-- Camera permission (for future use or WebRTC compatibility) -->
+    <key>NSCameraUsageDescription</key>
+    <string>This app may need camera access for video calls.</string>
     <!-- Allow arbitrary loads for WebRTC -->
     <key>NSAppTransportSecurity</key>
     <dict>
