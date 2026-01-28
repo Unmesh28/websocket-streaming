@@ -239,6 +239,7 @@
         let localStream = null;
         let audioTrack = null;
         let micReady = false;
+        let micAvailable = true; // Set to false if not secure context
         let isTalking = false;
 
         // Playback state
@@ -281,7 +282,12 @@
             disconnectBtn.disabled = !connected;
             refreshBtn.disabled = !connected;
 
-            // Update PTT button state
+            // Update PTT button state - but don't touch if mic unavailable (HTTP)
+            if (!micAvailable) {
+                // Keep showing HTTPS warning, don't change button state
+                return;
+            }
+
             if (micReady) {
                 pttBtn.classList.remove('no-mic');
                 if (connected) {
@@ -492,15 +498,22 @@
                 localStream = null;
                 audioTrack = null;
                 micReady = false;
-                pttBtn.classList.remove('disabled', 'requesting');
-                pttBtn.classList.add('no-mic');
-                pttLabel.textContent = 'TAP FOR MIC';
-                micState.textContent = 'Tap to enable';
-            } else if (keepMic && micReady) {
-                // Keep mic but show not connected
-                pttBtn.classList.add('disabled');
-                pttLabel.textContent = 'CONNECT FIRST';
             }
+
+            // Update PTT button state (only if mic is available on this context)
+            if (micAvailable) {
+                if (!keepMic) {
+                    pttBtn.classList.remove('disabled', 'requesting');
+                    pttBtn.classList.add('no-mic');
+                    pttLabel.textContent = 'TAP FOR MIC';
+                    micState.textContent = 'Tap to enable';
+                } else if (micReady) {
+                    // Keep mic but show not connected
+                    pttBtn.classList.add('disabled');
+                    pttLabel.textContent = 'CONNECT FIRST';
+                }
+            }
+            // If !micAvailable, button stays showing "NEED HTTPS"
 
             iceStateEl.textContent = '-';
             isConnected = false;
@@ -675,10 +688,8 @@
             updateButtons(false);
             showOverlay('Connecting...');
 
-            // Request mic permission in background
-            if (!micReady) {
-                requestMic().catch(() => {});
-            }
+            // Don't auto-request mic - let user tap PTT button
+            // This keeps video working even without mic permissions
 
             // Get TURN credentials
             try {
@@ -832,8 +843,31 @@
         // INIT
         // ============================================================================
         log('INIT', 'Viewer ready');
-        log('INIT', 'Secure context: ' + (window.isSecureContext || location.protocol === 'https:'));
-        log('INIT', 'Tap PTT button to enable microphone');
+
+        // Check secure context for mic availability
+        const isSecureContext = window.isSecureContext ||
+                                location.protocol === 'https:' ||
+                                location.hostname === 'localhost' ||
+                                location.hostname === '127.0.0.1';
+
+        log('INIT', 'Secure context: ' + isSecureContext);
+
+        if (!isSecureContext) {
+            // Mic unavailable on HTTP - but video still works!
+            micAvailable = false;
+            pttLabel.textContent = 'NEED HTTPS';
+            micState.textContent = 'Need HTTPS';
+            pttBtn.classList.add('disabled');
+            pttBtn.classList.remove('no-mic');
+            log('INIT', 'Mic unavailable on HTTP. Video will still work!');
+            console.warn('PTT requires HTTPS. Workarounds:\n' +
+                '1. Use localhost or 127.0.0.1\n' +
+                '2. Use HTTPS with valid certificate\n' +
+                '3. Chrome: chrome://flags/#unsafely-treat-insecure-origin-as-secure\n' +
+                '   Add your URL (e.g., http://192.168.1.100:8080) and restart Chrome');
+        } else {
+            log('INIT', 'Tap PTT button to enable microphone');
+        }
     </script>
 </body>
 </html>
