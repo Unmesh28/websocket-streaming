@@ -104,8 +104,18 @@
             background: linear-gradient(145deg, #6b7280, #4b5563);
         }
         .btn-ptt.no-mic {
-            background: linear-gradient(145deg, #6b7280, #4b5563);
-            pointer-events: auto;
+            background: linear-gradient(145deg, #f59e0b, #d97706);
+            pointer-events: auto !important;
+            cursor: pointer;
+        }
+        .btn-ptt.requesting {
+            background: linear-gradient(145deg, #8b5cf6, #7c3aed);
+            pointer-events: none;
+            animation: pulse-request 1s infinite;
+        }
+        @keyframes pulse-request {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(0.95); }
         }
 
         .mic-indicator {
@@ -185,11 +195,11 @@
             </div>
             <div id="micIndicator" class="mic-indicator">Transmitting...</div>
             <div class="ptt-container">
-                <button id="pttBtn" class="btn-ptt disabled no-mic"
+                <button id="pttBtn" class="btn-ptt no-mic"
                     onmousedown="startTalk()" onmouseup="stopTalk()" onmouseleave="stopTalk()"
                     ontouchstart="startTalk(event)" ontouchend="stopTalk(event)" ontouchcancel="stopTalk(event)">
-                    <span class="icon">MIC</span>
-                    <span>TALK</span>
+                    <span class="icon">🎤</span>
+                    <span id="pttLabel">TAP FOR MIC</span>
                 </button>
             </div>
         </div>
@@ -246,6 +256,7 @@
         const disconnectBtn = document.getElementById('disconnectBtn');
         const refreshBtn = document.getElementById('refreshBtn');
         const pttBtn = document.getElementById('pttBtn');
+        const pttLabel = document.getElementById('pttLabel');
         const micIndicator = document.getElementById('micIndicator');
 
         // ============================================================================
@@ -269,10 +280,22 @@
             connectBtn.disabled = connected;
             disconnectBtn.disabled = !connected;
             refreshBtn.disabled = !connected;
-            if (connected && micReady) {
-                pttBtn.classList.remove('disabled');
+
+            // Update PTT button state
+            if (micReady) {
+                pttBtn.classList.remove('no-mic');
+                if (connected) {
+                    pttBtn.classList.remove('disabled');
+                    pttLabel.textContent = 'HOLD TO TALK';
+                } else {
+                    pttBtn.classList.add('disabled');
+                    pttLabel.textContent = 'CONNECT FIRST';
+                }
             } else {
-                pttBtn.classList.add('disabled');
+                // Mic not ready - keep clickable to request permission
+                pttBtn.classList.remove('disabled');
+                pttBtn.classList.add('no-mic');
+                pttLabel.textContent = 'TAP FOR MIC';
             }
         }
 
@@ -300,6 +323,7 @@
             if (!isSecure) {
                 log('MIC', 'Not in secure context');
                 micState.textContent = 'Need HTTPS';
+                pttLabel.textContent = 'NEED HTTPS';
                 return false;
             }
 
@@ -307,8 +331,15 @@
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 log('MIC', 'getUserMedia not available');
                 micState.textContent = 'Not supported';
+                pttLabel.textContent = 'NOT SUPPORTED';
                 return false;
             }
+
+            // Show requesting state
+            pttBtn.classList.add('requesting');
+            pttBtn.classList.remove('no-mic');
+            pttLabel.textContent = 'ALLOW MIC...';
+            micState.textContent = 'Requesting...';
 
             try {
                 // Request audio with simple constraints first
@@ -318,10 +349,17 @@
                 if (audioTrack) {
                     audioTrack.enabled = false; // Start muted
                     micReady = true;
-                    pttBtn.classList.remove('no-mic');
+                    pttBtn.classList.remove('requesting', 'no-mic');
+
+                    // Update button state based on connection
                     if (isConnected) {
                         pttBtn.classList.remove('disabled');
+                        pttLabel.textContent = 'HOLD TO TALK';
+                    } else {
+                        pttBtn.classList.add('disabled');
+                        pttLabel.textContent = 'CONNECT FIRST';
                     }
+
                     micState.textContent = 'Ready';
                     log('MIC', 'Microphone ready: ' + audioTrack.label);
 
@@ -333,12 +371,18 @@
                 }
             } catch (e) {
                 log('MIC', 'Permission error: ' + e.name);
+                pttBtn.classList.remove('requesting');
+                pttBtn.classList.add('no-mic');
+
                 if (e.name === 'NotAllowedError') {
                     micState.textContent = 'Denied';
+                    pttLabel.textContent = 'MIC DENIED';
                 } else if (e.name === 'NotFoundError') {
                     micState.textContent = 'No mic found';
+                    pttLabel.textContent = 'NO MIC FOUND';
                 } else {
                     micState.textContent = 'Error';
+                    pttLabel.textContent = 'TAP FOR MIC';
                 }
             }
             return false;
@@ -364,6 +408,7 @@
 
             if (!micReady) {
                 // Try to get mic permission on first tap
+                log('MIC', 'Mic not ready, requesting permission');
                 requestMic().then(granted => {
                     if (granted && pc) {
                         addAudioTrackToPeerConnection();
@@ -372,26 +417,33 @@
                 return;
             }
 
-            if (!isConnected || !audioTrack) return;
+            if (!isConnected || !audioTrack) {
+                log('MIC', 'Cannot talk: connected=' + isConnected + ', audioTrack=' + !!audioTrack);
+                return;
+            }
 
             isTalking = true;
             audioTrack.enabled = true;
             pttBtn.classList.add('active');
             micIndicator.classList.add('active');
+            pttLabel.textContent = 'TALKING...';
             micState.textContent = 'Talking';
             log('MIC', 'PTT started');
         }
 
         function stopTalk(event) {
             if (event) event.preventDefault();
-            if (!audioTrack) return;
+            if (!isTalking) return;
 
             isTalking = false;
-            audioTrack.enabled = false;
+            if (audioTrack) {
+                audioTrack.enabled = false;
+            }
             pttBtn.classList.remove('active');
             micIndicator.classList.remove('active');
             if (micReady) {
                 micState.textContent = 'Ready';
+                pttLabel.textContent = 'HOLD TO TALK';
             }
             log('MIC', 'PTT stopped');
         }
@@ -440,8 +492,14 @@
                 localStream = null;
                 audioTrack = null;
                 micReady = false;
-                pttBtn.classList.add('no-mic', 'disabled');
+                pttBtn.classList.remove('disabled', 'requesting');
+                pttBtn.classList.add('no-mic');
+                pttLabel.textContent = 'TAP FOR MIC';
                 micState.textContent = 'Tap to enable';
+            } else if (keepMic && micReady) {
+                // Keep mic but show not connected
+                pttBtn.classList.add('disabled');
+                pttLabel.textContent = 'CONNECT FIRST';
             }
 
             iceStateEl.textContent = '-';
@@ -775,12 +833,7 @@
         // ============================================================================
         log('INIT', 'Viewer ready');
         log('INIT', 'Secure context: ' + (window.isSecureContext || location.protocol === 'https:'));
-
-        // Auto-request mic after short delay
-        setTimeout(() => {
-            log('INIT', 'Auto-requesting mic');
-            requestMic();
-        }, 1500);
+        log('INIT', 'Tap PTT button to enable microphone');
     </script>
 </body>
 </html>
