@@ -577,6 +577,7 @@ class WebRTCService extends ChangeNotifier {
     // Track event - remote media tracks
     _peerConnection!.onTrack = (RTCTrackEvent event) {
       debugPrint('[WebRTC] >>> onTrack: ${event.track.kind}, streams: ${event.streams.length}');
+      debugPrint('[WebRTC] Track ID: ${event.track.id}, enabled: ${event.track.enabled}, muted: ${event.track.muted}');
 
       if (event.streams.isEmpty) {
         debugPrint('[WebRTC] Warning: Track has no streams');
@@ -588,13 +589,23 @@ class WebRTCService extends ChangeNotifier {
 
       if (event.track.kind == 'video') {
         debugPrint('[WebRTC] Setting video stream to renderer');
+
+        // Explicitly enable the video track
+        event.track.enabled = true;
+        debugPrint('[WebRTC] Video track enabled: ${event.track.enabled}');
+
         _remoteStream = stream;
         if (_remoteRenderer != null) {
+          // Clear existing srcObject first to force rebind
+          _remoteRenderer!.srcObject = null;
           _remoteRenderer!.srcObject = stream;
+          debugPrint('[WebRTC] Video renderer srcObject set');
         }
         notifyListeners();
       } else if (event.track.kind == 'audio') {
         debugPrint('[WebRTC] Audio track received');
+        // Explicitly enable audio track
+        event.track.enabled = true;
         if (_remoteStream == null && _remoteRenderer != null) {
           _remoteStream = stream;
           _remoteRenderer!.srcObject = stream;
@@ -797,7 +808,8 @@ class WebRTCService extends ChangeNotifier {
       track.enabled = true;
     }
 
-    notifyListeners();
+    // Schedule notifyListeners to avoid calling during touch handling
+    Future.microtask(() => notifyListeners());
   }
 
   /// Stop talking (PTT released)
@@ -812,7 +824,8 @@ class WebRTCService extends ChangeNotifier {
       track.enabled = false;
     }
 
-    notifyListeners();
+    // Schedule notifyListeners to avoid calling during touch handling
+    Future.microtask(() => notifyListeners());
   }
 
   /// Dispose microphone resources
