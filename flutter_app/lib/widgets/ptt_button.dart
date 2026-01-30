@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 
 /// Push-to-Talk button widget
 /// Press and hold to talk, release to stop
-/// Uses Listener for reliable pointer events (not GestureDetector which can cancel)
 class PTTButton extends StatefulWidget {
   final bool enabled;
   final bool isTalking;
@@ -52,35 +51,22 @@ class _PTTButtonState extends State<PTTButton>
     super.dispose();
   }
 
-  void _handlePointerDown(PointerDownEvent event) {
-    debugPrint('[PTT] Pointer down, enabled: ${widget.enabled}');
+  void _handlePress() {
+    debugPrint('[PTT] Press detected, enabled: ${widget.enabled}');
 
     if (!widget.enabled) {
-      // If mic not enabled, try to request permission
       widget.onRequestMic?.call();
       return;
     }
 
-    if (_isPressed) return; // Already pressed
+    if (_isPressed) return;
 
     setState(() => _isPressed = true);
     _animationController.forward();
-
-    // Haptic feedback
     HapticFeedback.mediumImpact();
 
     debugPrint('[PTT] Starting talk');
     widget.onTalkStart();
-  }
-
-  void _handlePointerUp(PointerUpEvent event) {
-    debugPrint('[PTT] Pointer up');
-    _release();
-  }
-
-  void _handlePointerCancel(PointerCancelEvent event) {
-    debugPrint('[PTT] Pointer cancel');
-    _release();
   }
 
   void _release() {
@@ -99,12 +85,16 @@ class _PTTButtonState extends State<PTTButton>
   Widget build(BuildContext context) {
     final bool isActive = widget.isTalking || _isPressed;
 
-    // Use Listener for raw pointer events - more reliable than GestureDetector
-    // for press-and-hold behavior
-    return Listener(
-      onPointerDown: _handlePointerDown,
-      onPointerUp: _handlePointerUp,
-      onPointerCancel: _handlePointerCancel,
+    // Use GestureDetector with pan gestures for reliable press-and-hold
+    // Pan gestures don't get cancelled like tap gestures do
+    return GestureDetector(
+      onPanStart: (_) => _handlePress(),
+      onPanEnd: (_) => _release(),
+      onPanCancel: _release,
+      // Also handle taps for quick presses
+      onTapDown: (_) => _handlePress(),
+      onTapUp: (_) => _release(),
+      onTapCancel: _release,
       child: AnimatedBuilder(
         animation: _scaleAnimation,
         builder: (context, child) {
