@@ -39,11 +39,20 @@ class _DirectWebRTCScreenState extends State<DirectWebRTCScreen>
     // Create WebRTC service
     _webrtcService = WebRTCService();
 
-    // Initialize mic early
-    _webrtcService.initMicrophone();
+    // Initialize mic FIRST, then connect
+    // This ensures audio track is available for SDP negotiation
+    _initAndConnect();
+  }
 
-    // Only auto-connect if we have a valid URL
+  Future<void> _initAndConnect() async {
+    // Initialize mic first - wait for it to complete
+    debugPrint('[DirectWebRTC] Initializing microphone...');
+    final micReady = await _webrtcService.initMicrophone();
+    debugPrint('[DirectWebRTC] Microphone initialized: $micReady');
+
+    // Now connect if we have a valid URL
     if (_isValidUrl(widget.serverUrl)) {
+      debugPrint('[DirectWebRTC] Auto-connecting to ${widget.serverUrl}');
       _connect();
     }
   }

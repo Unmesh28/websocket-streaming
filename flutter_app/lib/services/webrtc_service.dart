@@ -355,30 +355,22 @@ class WebRTCService extends ChangeNotifier {
       // Set up handlers BEFORE any other operations
       _setupPeerConnectionHandlers();
 
-      // Add transceivers BEFORE setting remote description
-      // Video: RecvOnly (we only receive video from Pi)
-      // Audio: SendRecv (receive from Pi + send mic for PTT)
-      debugPrint('[WebRTC] Adding transceivers...');
-      try {
-        await _peerConnection!.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
-        );
-        debugPrint('[WebRTC] Video transceiver added (RecvOnly)');
-
-        // Use SendRecv for audio to support PTT (mic -> Pi)
-        await _peerConnection!.addTransceiver(
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
-        );
-        debugPrint('[WebRTC] Audio transceiver added (SendRecv for PTT)');
-      } catch (e) {
-        debugPrint('[WebRTC] Warning: Could not add transceivers: $e');
-      }
-
-      // Add local audio track if mic is initialized (for PTT)
+      // Add audio track BEFORE setting remote description (like web version)
+      // This ensures the SDP negotiation includes audio send capability
       if (_micInitialized && _localStream != null) {
-        await _addLocalAudioTrack();
+        debugPrint('[WebRTC] Adding audio track to peer connection BEFORE SDP negotiation');
+        try {
+          final audioTracks = _localStream!.getAudioTracks();
+          if (audioTracks.isNotEmpty) {
+            final track = audioTracks.first;
+            await _peerConnection!.addTrack(track, _localStream!);
+            debugPrint('[WebRTC] Audio track added: ${track.id}');
+          }
+        } catch (e) {
+          debugPrint('[WebRTC] Error adding audio track: $e');
+        }
+      } else {
+        debugPrint('[WebRTC] Mic not initialized, skipping audio track (micInit: $_micInitialized, localStream: ${_localStream != null})');
       }
 
       // Set remote description (offer)
