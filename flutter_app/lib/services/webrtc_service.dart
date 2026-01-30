@@ -26,6 +26,11 @@ class WebRTCService extends ChangeNotifier {
   bool _audioEnabled = true;
   bool _videoEnabled = true;
 
+  // Microphone state (for PTT - Push-to-Talk)
+  MediaStream? _localStream;
+  bool _micInitialized = false;
+  bool _isTalking = false;
+
   String? _currentUrl;
   String? _currentStreamId;
   String? _viewerId;
@@ -49,7 +54,12 @@ class WebRTCService extends ChangeNotifier {
   bool get audioEnabled => _audioEnabled;
   bool get videoEnabled => _videoEnabled;
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
+  MediaStream? get remoteStream => _remoteStream;
   bool get isConnected => _connectionState == StreamState.connected;
+
+  // Microphone getters
+  bool get micInitialized => _micInitialized;
+  bool get isTalking => _isTalking;
 
   // Connection state flags for UI to check
   bool get isConnecting => _isConnecting;
@@ -346,22 +356,29 @@ class WebRTCService extends ChangeNotifier {
       _setupPeerConnectionHandlers();
 
       // Add transceivers BEFORE setting remote description
-      // This tells WebRTC we want to receive video and audio
-      debugPrint('[WebRTC] Adding receive-only transceivers...');
+      // Video: RecvOnly (we only receive video from Pi)
+      // Audio: SendRecv (receive from Pi + send mic for PTT)
+      debugPrint('[WebRTC] Adding transceivers...');
       try {
         await _peerConnection!.addTransceiver(
           kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
           init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
         );
-        debugPrint('[WebRTC] Video transceiver added');
+        debugPrint('[WebRTC] Video transceiver added (RecvOnly)');
 
+        // Use SendRecv for audio to support PTT (mic -> Pi)
         await _peerConnection!.addTransceiver(
           kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+          init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendRecv),
         );
-        debugPrint('[WebRTC] Audio transceiver added');
+        debugPrint('[WebRTC] Audio transceiver added (SendRecv for PTT)');
       } catch (e) {
         debugPrint('[WebRTC] Warning: Could not add transceivers: $e');
+      }
+
+      // Add local audio track if mic is initialized (for PTT)
+      if (_micInitialized && _localStream != null) {
+        await _addLocalAudioTrack();
       }
 
       // Set remote description (offer)
@@ -681,6 +698,140 @@ class WebRTCService extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ============================================================================
+  // MICROPHONE / PTT (Push-to-Talk) SUPPORT
+  // ============================================================================
+
+  /// Initialize microphone for PTT
+  /// Call this before connecting or after connection is established
+  Future<bool> initMicrophone() async {
+    if (_micInitialized && _localStream != null) {
+      debugPrint('[WebRTC] Microphone already initialized');
+      return true;
+    }
+
+    try {
+      debugPrint('[WebRTC] Initializing microphone...');
+
+      // Request microphone access
+      _localStream = await navigator.mediaDevices.getUserMedia({
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+        },
+        'video': false,
+      });
+
+      // Start with mic muted
+      for (final track in _localStream!.getAudioTracks()) {
+        track.enabled = false;
+        debugPrint('[WebRTC] Mic track initialized (muted): ${track.label}');
+      }
+
+      _micInitialized = true;
+      notifyListeners();
+      debugPrint('[WebRTC] Microphone initialized successfully');
+
+      // Add track to peer connection if already connected
+      await _addLocalAudioTrack();
+
+      return true;
+    } catch (e) {
+      debugPrint('[WebRTC] Failed to initialize microphone: $e');
+      _micInitialized = false;
+      return false;
+    }
+  }
+
+  /// Add local audio track to peer connection
+  Future<void> _addLocalAudioTrack() async {
+    if (_peerConnection == null || _localStream == null) {
+      debugPrint('[WebRTC] Cannot add audio track: pc=${_peerConnection != null}, localStream=${_localStream != null}');
+      return;
+    }
+
+    try {
+      final audioTracks = _localStream!.getAudioTracks();
+      if (audioTracks.isEmpty) {
+        debugPrint('[WebRTC] No audio tracks in local stream');
+        return;
+      }
+
+      // Check if we already have an audio sender
+      final senders = await _peerConnection!.getSenders();
+      final hasAudioSender = senders.any((s) => s.track?.kind == 'audio');
+
+      if (hasAudioSender) {
+        debugPrint('[WebRTC] Audio sender already exists');
+        return;
+      }
+
+      // Add the audio track
+      final track = audioTracks.first;
+      await _peerConnection!.addTrack(track, _localStream!);
+      debugPrint('[WebRTC] Local audio track added to peer connection');
+
+    } catch (e) {
+      debugPrint('[WebRTC] Error adding local audio track: $e');
+    }
+  }
+
+  /// Start talking (PTT pressed)
+  void startTalk() {
+    if (!_micInitialized || _localStream == null) {
+      debugPrint('[WebRTC] Cannot start talk: mic not initialized');
+      return;
+    }
+
+    if (!isConnected) {
+      debugPrint('[WebRTC] Cannot start talk: not connected');
+      return;
+    }
+
+    debugPrint('[WebRTC] PTT: Starting talk');
+    _isTalking = true;
+
+    // Enable audio track
+    for (final track in _localStream!.getAudioTracks()) {
+      track.enabled = true;
+    }
+
+    notifyListeners();
+  }
+
+  /// Stop talking (PTT released)
+  void stopTalk() {
+    if (_localStream == null) return;
+
+    debugPrint('[WebRTC] PTT: Stopping talk');
+    _isTalking = false;
+
+    // Disable audio track
+    for (final track in _localStream!.getAudioTracks()) {
+      track.enabled = false;
+    }
+
+    notifyListeners();
+  }
+
+  /// Dispose microphone resources
+  Future<void> _disposeMicrophone() async {
+    if (_localStream != null) {
+      debugPrint('[WebRTC] Disposing microphone stream');
+      for (final track in _localStream!.getTracks()) {
+        try {
+          track.stop();
+        } catch (e) {
+          debugPrint('[WebRTC] Error stopping local track: $e');
+        }
+      }
+      _localStream = null;
+    }
+    _micInitialized = false;
+    _isTalking = false;
+  }
+
   void _applyMediaState() {
     final stream = _remoteRenderer?.srcObject;
     if (stream == null) return;
@@ -887,6 +1038,14 @@ class WebRTCService extends ChangeNotifier {
       _remoteRenderer!.srcObject = null;
     }
     _remoteStream = null;
+
+    // Stop talking if active (but keep mic initialized for reconnect)
+    _isTalking = false;
+    if (_localStream != null) {
+      for (final track in _localStream!.getAudioTracks()) {
+        track.enabled = false;
+      }
+    }
 
     // Remove peer connection event handlers before closing
     // This prevents callbacks firing on destroyed objects

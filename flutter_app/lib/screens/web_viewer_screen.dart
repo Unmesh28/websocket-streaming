@@ -4,6 +4,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'direct_webrtc_screen.dart';
 
 class WebViewerScreen extends StatefulWidget {
   final String initialUrl;
@@ -257,6 +258,36 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
     _controller?.reload();
   }
 
+  void _openDirectWebRTC() {
+    String url = _urlController.text.trim();
+
+    // Validate URL
+    if (url.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a server URL first'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    // Ensure URL has protocol
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      if (RegExp(r'^\d+\.\d+\.\d+\.\d+').hasMatch(url)) {
+        url = 'http://$url';
+      } else {
+        url = 'https://$url';
+      }
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => DirectWebRTCScreen(serverUrl: url),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -273,6 +304,12 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
         foregroundColor: Colors.white,
         automaticallyImplyLeading: false,
         actions: [
+          // Direct WebRTC button - switches to native WebRTC mode
+          IconButton(
+            icon: const Icon(Icons.cast_connected),
+            onPressed: () => _openDirectWebRTC(),
+            tooltip: 'Direct WebRTC (with Mic)',
+          ),
           // Microphone status indicator
           if (_hasLoadedUrl)
             Padding(
@@ -360,37 +397,72 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
                 ? WebViewWidget(controller: _controller!)
                 : Container(
                     color: Colors.black,
-                    child: const Center(
+                    child: Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
+                          const Icon(
                             Icons.videocam,
                             size: 64,
                             color: Colors.deepPurple,
                           ),
-                          SizedBox(height: 16),
-                          Text(
+                          const SizedBox(height: 16),
+                          const Text(
                             'Enter server URL and tap Go',
                             style: TextStyle(
                               color: Colors.white70,
                               fontSize: 16,
                             ),
                           ),
-                          SizedBox(height: 8),
-                          Text(
+                          const SizedBox(height: 8),
+                          const Text(
                             'Example: http://3.110.83.74:8080',
                             style: TextStyle(
                               color: Colors.white38,
                               fontSize: 14,
                             ),
                           ),
-                          SizedBox(height: 16),
-                          Text(
-                            'Push-to-talk enabled',
-                            style: TextStyle(
-                              color: Colors.green,
-                              fontSize: 12,
+                          const SizedBox(height: 24),
+                          // Direct WebRTC option
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[900],
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.deepPurple.withOpacity(0.5)),
+                            ),
+                            child: Column(
+                              children: [
+                                const Text(
+                                  'For Push-to-Talk with Microphone',
+                                  style: TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                ElevatedButton.icon(
+                                  onPressed: _openDirectWebRTC,
+                                  icon: const Icon(Icons.cast_connected),
+                                  label: const Text('Use Direct WebRTC'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.green,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 24,
+                                      vertical: 12,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'Native WebRTC with full mic access',
+                                  style: TextStyle(
+                                    color: Colors.green,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
