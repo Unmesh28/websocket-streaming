@@ -460,9 +460,9 @@ class WebRTCService extends ChangeNotifier {
     // Fix the BUNDLE group to include video0
     String fixedSdp = answerSdp;
     if (!fixedSdp.contains('BUNDLE video0')) {
-      fixedSdp = fixedSdp.replaceFirst(
+      fixedSdp = fixedSdp.replaceFirstMapped(
         RegExp(r'a=group:BUNDLE ([^\r\n]+)'),
-        'a=group:BUNDLE video0 \$1',
+        (match) => 'a=group:BUNDLE video0 ${match.group(1)}',
       );
       debugPrint('[WebRTC] Fixed BUNDLE group to include video0');
     }
