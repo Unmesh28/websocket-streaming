@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 /// Push-to-Talk button widget
 /// Press and hold to talk, release to stop
+/// Uses Listener for reliable pointer events (not GestureDetector which can cancel)
 class PTTButton extends StatefulWidget {
   final bool enabled;
   final bool isTalking;
@@ -43,16 +44,24 @@ class _PTTButtonState extends State<PTTButton>
 
   @override
   void dispose() {
+    // Make sure to stop talking when disposed
+    if (_isPressed && widget.enabled) {
+      widget.onTalkEnd();
+    }
     _animationController.dispose();
     super.dispose();
   }
 
-  void _handleTapDown(TapDownDetails details) {
+  void _handlePointerDown(PointerDownEvent event) {
+    debugPrint('[PTT] Pointer down, enabled: ${widget.enabled}');
+
     if (!widget.enabled) {
       // If mic not enabled, try to request permission
       widget.onRequestMic?.call();
       return;
     }
+
+    if (_isPressed) return; // Already pressed
 
     setState(() => _isPressed = true);
     _animationController.forward();
@@ -60,20 +69,24 @@ class _PTTButtonState extends State<PTTButton>
     // Haptic feedback
     HapticFeedback.mediumImpact();
 
+    debugPrint('[PTT] Starting talk');
     widget.onTalkStart();
   }
 
-  void _handleTapUp(TapUpDetails details) {
+  void _handlePointerUp(PointerUpEvent event) {
+    debugPrint('[PTT] Pointer up');
     _release();
   }
 
-  void _handleTapCancel() {
+  void _handlePointerCancel(PointerCancelEvent event) {
+    debugPrint('[PTT] Pointer cancel');
     _release();
   }
 
   void _release() {
     if (!_isPressed) return;
 
+    debugPrint('[PTT] Releasing, stopping talk');
     setState(() => _isPressed = false);
     _animationController.reverse();
 
@@ -86,10 +99,12 @@ class _PTTButtonState extends State<PTTButton>
   Widget build(BuildContext context) {
     final bool isActive = widget.isTalking || _isPressed;
 
-    return GestureDetector(
-      onTapDown: _handleTapDown,
-      onTapUp: _handleTapUp,
-      onTapCancel: _handleTapCancel,
+    // Use Listener for raw pointer events - more reliable than GestureDetector
+    // for press-and-hold behavior
+    return Listener(
+      onPointerDown: _handlePointerDown,
+      onPointerUp: _handlePointerUp,
+      onPointerCancel: _handlePointerCancel,
       child: AnimatedBuilder(
         animation: _scaleAnimation,
         builder: (context, child) {
