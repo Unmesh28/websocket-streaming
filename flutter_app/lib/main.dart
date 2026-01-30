@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'screens/web_viewer_screen.dart';
+import 'screens/home_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,7 +21,7 @@ class PiCameraApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const WebViewerScreen(initialUrl: 'http://3.110.83.74:8080'),
+      home: const HomeScreen(),
     );
   }
 }
