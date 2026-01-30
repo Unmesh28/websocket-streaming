@@ -594,23 +594,27 @@ class WebRTCService extends ChangeNotifier {
         event.track.enabled = true;
         debugPrint('[WebRTC] Video track enabled: ${event.track.enabled}');
 
+        // Log video track details
+        final videoTracks = stream.getVideoTracks();
+        debugPrint('[WebRTC] Video tracks in stream: ${videoTracks.length}');
+        for (var vt in videoTracks) {
+          debugPrint('[WebRTC]   Video track: ${vt.id}, enabled: ${vt.enabled}, muted: ${vt.muted}');
+        }
+
         _remoteStream = stream;
         if (_remoteRenderer != null) {
-          // Clear existing srcObject first to force rebind
-          _remoteRenderer!.srcObject = null;
+          // Set stream directly without clearing first
           _remoteRenderer!.srcObject = stream;
-          debugPrint('[WebRTC] Video renderer srcObject set');
+          debugPrint('[WebRTC] Video renderer srcObject set to stream: ${stream.id}');
+        } else {
+          debugPrint('[WebRTC] WARNING: remoteRenderer is null!');
         }
         notifyListeners();
       } else if (event.track.kind == 'audio') {
         debugPrint('[WebRTC] Audio track received');
         // Explicitly enable audio track
         event.track.enabled = true;
-        if (_remoteStream == null && _remoteRenderer != null) {
-          _remoteStream = stream;
-          _remoteRenderer!.srcObject = stream;
-          notifyListeners();
-        }
+        // Don't set audio-only stream to video renderer
       }
     };
 
