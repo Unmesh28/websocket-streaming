@@ -390,19 +390,11 @@ class WebRTCService extends ChangeNotifier {
       final answer = await _peerConnection!.createAnswer();
       debugPrint('[WebRTC] Answer created, SDP length: ${answer.sdp?.length}');
 
-      // Check if video section was rejected (port 0) and fix it
-      String fixedSdp = answer.sdp ?? '';
-      if (fixedSdp.contains('m=video 0 ')) {
-        debugPrint('[WebRTC] WARNING: Video section rejected in answer, attempting to fix...');
-        fixedSdp = _fixRejectedVideoInSdp(fixedSdp, sdpStr);
-      }
-
-      _logSdpInfo('ANSWER', fixedSdp);
+      final answerSdp = answer.sdp ?? '';
+      _logSdpInfo('ANSWER', answerSdp);
 
       debugPrint('[WebRTC] Setting local description (answer)...');
-      await _peerConnection!.setLocalDescription(
-        RTCSessionDescription(fixedSdp, 'answer'),
-      );
+      await _peerConnection!.setLocalDescription(answer);
       debugPrint('[WebRTC] Local description set - ICE gathering should start now');
 
       // Send answer to server
@@ -410,7 +402,7 @@ class WebRTCService extends ChangeNotifier {
       _send({
         'type': 'answer',
         'to': _broadcasterId,
-        'sdp': fixedSdp,
+        'sdp': answerSdp,
       });
 
       _updateState(StreamState.connecting, 'Establishing connection...');
@@ -430,58 +422,6 @@ class WebRTCService extends ChangeNotifier {
       _updateState(StreamState.failed, 'Setup failed: $e');
     }
   }
-
-  /// Fix rejected video section in SDP answer
-  /// When Flutter WebRTC doesn't support H264, it rejects video with port 0
-  String _fixRejectedVideoInSdp(String answerSdp, String offerSdp) {
-    debugPrint('[WebRTC] Attempting to fix rejected video in SDP...');
-
-    // Extract video codec info from offer
-    final videoPayloadMatch = RegExp(r'm=video \d+ UDP/TLS/RTP/SAVPF (\d+)').firstMatch(offerSdp);
-    if (videoPayloadMatch == null) {
-      debugPrint('[WebRTC] Could not extract video payload from offer');
-      return answerSdp;
-    }
-    final payloadType = videoPayloadMatch.group(1)!;
-    debugPrint('[WebRTC] Offer video payload type: $payloadType');
-
-    // Get the rtpmap line from offer
-    final rtpmapMatch = RegExp('a=rtpmap:$payloadType ([^\r\n]+)').firstMatch(offerSdp);
-    final rtpmapLine = rtpmapMatch != null ? 'a=rtpmap:$payloadType ${rtpmapMatch.group(1)}' : 'a=rtpmap:$payloadType H264/90000';
-
-    // Fix the BUNDLE group to include video0
-    String fixedSdp = answerSdp;
-    if (!fixedSdp.contains('BUNDLE video0')) {
-      fixedSdp = fixedSdp.replaceFirstMapped(
-        RegExp(r'a=group:BUNDLE ([^\r\n]+)'),
-        (match) => 'a=group:BUNDLE video0 ${match.group(1)}',
-      );
-      debugPrint('[WebRTC] Fixed BUNDLE group to include video0');
-    }
-
-    // Fix the video m-line (change port 0 to 9, fix payload type)
-    fixedSdp = fixedSdp.replaceFirst(
-      RegExp(r'm=video 0 UDP/TLS/RTP/SAVPF \d+'),
-      'm=video 9 UDP/TLS/RTP/SAVPF $payloadType',
-    );
-
-    // Ensure proper rtpmap line exists for the video codec
-    if (!fixedSdp.contains('a=rtpmap:$payloadType')) {
-      // Add rtpmap after the video m-line section's mid
-      fixedSdp = fixedSdp.replaceFirst(
-        'a=mid:video0\r\n',
-        'a=mid:video0\r\n$rtpmapLine\r\n',
-      );
-      fixedSdp = fixedSdp.replaceFirst(
-        'a=mid:video0\n',
-        'a=mid:video0\n$rtpmapLine\n',
-      );
-    }
-
-    debugPrint('[WebRTC] SDP video section fixed');
-    return fixedSdp;
-  }
-
   void _setupPeerConnectionHandlers() {
     if (_peerConnection == null) return;
 
