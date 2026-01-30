@@ -507,25 +507,24 @@
                             return;
                         }
 
-                        // Force unmute for playback (we're handling audio separately)
-                        video.muted = false;
+                        // Start muted for autoplay policy compliance
+                        video.muted = true;
 
                         video.play().then(() => {
-                            log('VIDEO', 'Playing with audio');
+                            log('VIDEO', 'Playing (muted for autoplay)');
                             isPlayPending = false;
-                        }).catch(err => {
-                            log('VIDEO', 'Play error (' + err.name + '), trying muted');
-                            // Verify still valid before retry
-                            if (playAttemptId !== currentAttemptId) return;
 
-                            video.muted = true;
-                            video.play().then(() => {
-                                log('VIDEO', 'Playing muted');
-                                isPlayPending = false;
-                            }).catch(e => {
-                                log('VIDEO', 'Muted play also failed: ' + e.name);
-                                isPlayPending = false;
-                            });
+                            // Try to unmute after successful play
+                            // This works in some contexts (user interaction or permission granted)
+                            setTimeout(() => {
+                                if (playAttemptId === currentAttemptId && video.srcObject) {
+                                    video.muted = false;
+                                    log('VIDEO', 'Unmuted after play');
+                                }
+                            }, 200);
+                        }).catch(err => {
+                            log('VIDEO', 'Muted play error: ' + err.name);
+                            isPlayPending = false;
                         });
                     }, 100);
                 }
