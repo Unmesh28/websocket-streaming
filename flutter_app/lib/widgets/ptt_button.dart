@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 /// Push-to-Talk button widget
 /// Press and hold to talk, release to stop
+/// Uses raw Listener for reliable pointer events without gesture conflicts
 class PTTButton extends StatefulWidget {
   final bool enabled;
   final bool isTalking;
@@ -28,6 +29,8 @@ class _PTTButtonState extends State<PTTButton>
   late AnimationController _animationController;
   late Animation<double> _scaleAnimation;
   bool _isPressed = false;
+  bool _disposed = false;
+  int? _activePointerId;
 
   @override
   void initState() {
@@ -43,25 +46,33 @@ class _PTTButtonState extends State<PTTButton>
 
   @override
   void dispose() {
+    _disposed = true;
     // Make sure to stop talking when disposed
     if (_isPressed && widget.enabled) {
+      _isPressed = false;
       widget.onTalkEnd();
     }
     _animationController.dispose();
     super.dispose();
   }
 
-  void _handlePress() {
-    debugPrint('[PTT] Press detected, enabled: ${widget.enabled}');
+  void _onPointerDown(PointerDownEvent event) {
+    if (_disposed || _isPressed) return;
+
+    debugPrint('[PTT] Pointer down (id: ${event.pointer}), enabled: ${widget.enabled}');
 
     if (!widget.enabled) {
       widget.onRequestMic?.call();
       return;
     }
 
-    if (_isPressed) return;
+    _activePointerId = event.pointer;
+    _isPressed = true;
 
-    setState(() => _isPressed = true);
+    if (mounted && !_disposed) {
+      setState(() {});
+    }
+
     _animationController.forward();
     HapticFeedback.mediumImpact();
 
@@ -69,11 +80,33 @@ class _PTTButtonState extends State<PTTButton>
     widget.onTalkStart();
   }
 
+  void _onPointerUp(PointerUpEvent event) {
+    if (_disposed) return;
+    if (event.pointer != _activePointerId) return;
+
+    debugPrint('[PTT] Pointer up (id: ${event.pointer})');
+    _release();
+  }
+
+  void _onPointerCancel(PointerCancelEvent event) {
+    if (_disposed) return;
+    if (event.pointer != _activePointerId) return;
+
+    debugPrint('[PTT] Pointer cancel (id: ${event.pointer})');
+    _release();
+  }
+
   void _release() {
-    if (!_isPressed) return;
+    if (!_isPressed || _disposed) return;
 
     debugPrint('[PTT] Releasing, stopping talk');
-    setState(() => _isPressed = false);
+    _isPressed = false;
+    _activePointerId = null;
+
+    if (mounted && !_disposed) {
+      setState(() {});
+    }
+
     _animationController.reverse();
 
     if (widget.enabled) {
@@ -85,16 +118,12 @@ class _PTTButtonState extends State<PTTButton>
   Widget build(BuildContext context) {
     final bool isActive = widget.isTalking || _isPressed;
 
-    // Use GestureDetector with pan gestures for reliable press-and-hold
-    // Pan gestures don't get cancelled like tap gestures do
-    return GestureDetector(
-      onPanStart: (_) => _handlePress(),
-      onPanEnd: (_) => _release(),
-      onPanCancel: _release,
-      // Also handle taps for quick presses
-      onTapDown: (_) => _handlePress(),
-      onTapUp: (_) => _release(),
-      onTapCancel: _release,
+    // Use Listener for raw pointer events - no gesture recognition conflicts
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: _onPointerDown,
+      onPointerUp: _onPointerUp,
+      onPointerCancel: _onPointerCancel,
       child: AnimatedBuilder(
         animation: _scaleAnimation,
         builder: (context, child) {
