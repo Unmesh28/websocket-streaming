@@ -346,7 +346,7 @@ class _WebViewerScreenState extends State<WebViewerScreen> with WidgetsBindingOb
                   child: TextField(
                     controller: _urlController,
                     decoration: InputDecoration(
-                      hintText: 'Enter server URL (e.g., http://1.2.3.4:8080)',
+                      hintText: 'Enter server URL (e.g., http://3.110.83.74:8080)',
                       filled: true,
                       fillColor: Colors.grey[800],
                       contentPadding: const EdgeInsets.symmetric(

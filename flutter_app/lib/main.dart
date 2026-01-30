@@ -21,7 +21,7 @@ class PiCameraApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const WebViewerScreen(initialUrl: 'https://'),
+      home: const WebViewerScreen(initialUrl: 'http://3.110.83.74:8080'),
     );
   }
 }
