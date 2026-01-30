@@ -233,6 +233,7 @@
 
         // Playback state
         let isPlayPending = false;
+        let playAttemptId = 0;  // Increments each connection to cancel stale play attempts
 
         // DOM elements
         const video = document.getElementById('video');
@@ -403,6 +404,7 @@
             log('CLEANUP', 'Cleaning up, keepMic=' + keepMic);
 
             isPlayPending = false;
+            playAttemptId++;  // Cancel any pending play attempts
 
             if (pc) {
                 pc.ontrack = null;
@@ -412,6 +414,9 @@
                 try { pc.close(); } catch (e) {}
                 pc = null;
             }
+
+            // Pause video BEFORE stopping tracks to prevent AbortError
+            try { video.pause(); } catch (e) {}
 
             if (video.srcObject) {
                 try {
@@ -486,34 +491,43 @@
                     hideOverlay();
 
                     // Try to play with delay to avoid race conditions
-                    if (!isPlayPending && video.paused) {
-                        isPlayPending = true;
-                        const currentStream = stream;
+                    const currentAttemptId = playAttemptId;
+                    const currentStream = stream;
 
-                        setTimeout(() => {
-                            // Check if stream changed or peer connection closed
-                            if (!pc || video.srcObject !== currentStream) {
-                                log('VIDEO', 'Play cancelled, stream changed');
+                    // Always attempt to play on new track, reset pending state
+                    isPlayPending = true;
+
+                    setTimeout(() => {
+                        // Check if connection was cleaned up or stream changed
+                        if (playAttemptId !== currentAttemptId || !pc || video.srcObject !== currentStream) {
+                            log('VIDEO', 'Play cancelled, connection changed');
+                            if (playAttemptId === currentAttemptId) {
                                 isPlayPending = false;
-                                return;
                             }
+                            return;
+                        }
 
+                        // Force unmute for playback (we're handling audio separately)
+                        video.muted = false;
+
+                        video.play().then(() => {
+                            log('VIDEO', 'Playing with audio');
+                            isPlayPending = false;
+                        }).catch(err => {
+                            log('VIDEO', 'Play error (' + err.name + '), trying muted');
+                            // Verify still valid before retry
+                            if (playAttemptId !== currentAttemptId) return;
+
+                            video.muted = true;
                             video.play().then(() => {
-                                log('VIDEO', 'Playing');
+                                log('VIDEO', 'Playing muted');
                                 isPlayPending = false;
-                            }).catch(err => {
-                                log('VIDEO', 'Play error, trying muted: ' + err.name);
-                                video.muted = true;
-                                video.play().then(() => {
-                                    log('VIDEO', 'Playing muted');
-                                    isPlayPending = false;
-                                }).catch(e => {
-                                    log('VIDEO', 'Muted play failed: ' + e.name);
-                                    isPlayPending = false;
-                                });
+                            }).catch(e => {
+                                log('VIDEO', 'Muted play also failed: ' + e.name);
+                                isPlayPending = false;
                             });
-                        }, 100);
-                    }
+                        });
+                    }, 100);
                 }
             };
 
