@@ -23,29 +23,81 @@ class DirectWebRTCScreen extends StatefulWidget {
 class _DirectWebRTCScreenState extends State<DirectWebRTCScreen>
     with WidgetsBindingObserver {
   late WebRTCService _webrtcService;
+  late TextEditingController _urlController;
   bool _isFullscreen = false;
+  String _currentUrl = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    // Create and connect WebRTC service
+    // Initialize URL controller with passed URL
+    _currentUrl = widget.serverUrl;
+    _urlController = TextEditingController(text: widget.serverUrl);
+
+    // Create WebRTC service
     _webrtcService = WebRTCService();
-    _initConnection();
+
+    // Initialize mic early
+    _webrtcService.initMicrophone();
+
+    // Only auto-connect if we have a valid URL
+    if (_isValidUrl(widget.serverUrl)) {
+      _connect();
+    }
   }
 
-  Future<void> _initConnection() async {
-    // Initialize microphone first
-    await _webrtcService.initMicrophone();
+  bool _isValidUrl(String url) {
+    if (url.isEmpty) return false;
+    try {
+      final uri = Uri.parse(url);
+      return uri.host.isNotEmpty;
+    } catch (e) {
+      return false;
+    }
+  }
 
-    // Connect to stream
-    await _webrtcService.connect(widget.serverUrl);
+  String _normalizeUrl(String url) {
+    url = url.trim();
+    if (url.isEmpty) return '';
+
+    // Add protocol if missing
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      // Use http for IP addresses
+      if (RegExp(r'^\d+\.\d+\.\d+\.\d+').hasMatch(url.split(':')[0])) {
+        url = 'http://$url';
+      } else {
+        url = 'https://$url';
+      }
+    }
+    return url;
+  }
+
+  Future<void> _connect() async {
+    String url = _normalizeUrl(_urlController.text);
+
+    if (!_isValidUrl(url)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a valid server URL'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _currentUrl = url;
+    });
+
+    await _webrtcService.connect(url);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _urlController.dispose();
     _webrtcService.disconnect();
     _webrtcService.dispose();
     super.dispose();
@@ -55,8 +107,8 @@ class _DirectWebRTCScreenState extends State<DirectWebRTCScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       // Reconnect if disconnected when app comes back to foreground
-      if (!_webrtcService.isConnected) {
-        _webrtcService.connect(widget.serverUrl);
+      if (!_webrtcService.isConnected && _isValidUrl(_currentUrl)) {
+        _webrtcService.connect(_currentUrl);
       }
     }
   }
@@ -142,101 +194,150 @@ class _DirectWebRTCScreenState extends State<DirectWebRTCScreen>
                       ),
                     ],
                   ),
-            body: Stack(
-              fit: StackFit.expand,
+            body: Column(
               children: [
-                // Video display
-                _buildVideoView(service),
-
-                // Connection overlay
-                if (service.connectionState != StreamState.connected)
-                  _buildConnectionOverlay(service),
-
-                // Talking indicator
-                if (service.isTalking)
-                  Positioned(
-                    top: _isFullscreen ? 20 : 10,
-                    right: 10,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.9),
-                        borderRadius: BorderRadius.circular(5),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.mic, color: Colors.white, size: 16),
-                          SizedBox(width: 4),
-                          Text(
-                            'Transmitting...',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
+                // URL input bar (when not fullscreen and not connected)
+                if (!_isFullscreen && service.connectionState != StreamState.connected)
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    color: Colors.grey[900],
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _urlController,
+                            decoration: InputDecoration(
+                              hintText: 'Server URL (e.g., http://3.110.83.74:8080)',
+                              filled: true,
+                              fillColor: Colors.grey[800],
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 8,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(8),
+                                borderSide: BorderSide.none,
+                              ),
+                              prefixIcon: const Icon(Icons.link, size: 20, color: Colors.white70),
+                              hintStyle: const TextStyle(color: Colors.white38, fontSize: 14),
+                            ),
+                            style: const TextStyle(color: Colors.white),
+                            keyboardType: TextInputType.url,
+                            textInputAction: TextInputAction.go,
+                            onSubmitted: (_) => _connect(),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: service.isOperationInProgress ? null : _connect,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 12,
                             ),
                           ),
-                        ],
-                      ),
+                          child: const Text('Connect'),
+                        ),
+                      ],
                     ),
                   ),
 
-                // PTT Button
-                if (service.isConnected)
-                  Positioned(
-                    bottom: _isFullscreen ? 30 : 20,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: PTTButton(
-                        enabled: service.micInitialized,
-                        isTalking: service.isTalking,
-                        onTalkStart: () => service.startTalk(),
-                        onTalkEnd: () => service.stopTalk(),
-                        onRequestMic: () async {
-                          final success = await service.initMicrophone();
-                          if (!success && mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Microphone permission denied'),
-                                backgroundColor: Colors.red,
+                // Main content
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // Video display
+                      _buildVideoView(service),
+
+                      // Connection overlay
+                      if (service.connectionState != StreamState.connected)
+                        _buildConnectionOverlay(service),
+
+                      // Talking indicator
+                      if (service.isTalking)
+                        Positioned(
+                          top: _isFullscreen ? 20 : 10,
+                          right: 10,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withOpacity(0.9),
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.mic, color: Colors.white, size: 16),
+                                SizedBox(width: 4),
+                                Text(
+                                  'Transmitting...',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                      // PTT Button
+                      if (service.isConnected)
+                        Positioned(
+                          bottom: _isFullscreen ? 30 : 80,
+                          left: 0,
+                          right: 0,
+                          child: Center(
+                            child: PTTButton(
+                              enabled: service.micInitialized,
+                              isTalking: service.isTalking,
+                              onTalkStart: () => service.startTalk(),
+                              onTalkEnd: () => service.stopTalk(),
+                              onRequestMic: () async {
+                                final success = await service.initMicrophone();
+                                if (!success && mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Microphone permission denied'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+
+                      // Fullscreen exit tap area
+                      if (_isFullscreen)
+                        Positioned(
+                          top: 0,
+                          right: 0,
+                          child: GestureDetector(
+                            onTap: _toggleFullscreen,
+                            child: Container(
+                              padding: const EdgeInsets.all(16),
+                              child: const Icon(
+                                Icons.fullscreen_exit,
+                                color: Colors.white54,
+                                size: 30,
                               ),
-                            );
-                          }
-                        },
-                      ),
-                    ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
+                ),
 
                 // Status bar at bottom (when not fullscreen)
-                if (!_isFullscreen)
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: _buildStatusBar(service),
-                  ),
-
-                // Fullscreen exit tap area
-                if (_isFullscreen)
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: GestureDetector(
-                      onTap: _toggleFullscreen,
-                      child: Container(
-                        padding: const EdgeInsets.all(16),
-                        child: const Icon(
-                          Icons.fullscreen_exit,
-                          color: Colors.white54,
-                          size: 30,
-                        ),
-                      ),
-                    ),
-                  ),
+                if (!_isFullscreen) _buildStatusBar(service),
               ],
             ),
           );
@@ -299,13 +400,22 @@ class _DirectWebRTCScreenState extends State<DirectWebRTCScreen>
               ),
               textAlign: TextAlign.center,
             ),
-            if (service.connectionState == StreamState.failed ||
-                service.connectionState == StreamState.disconnected) ...[
+            const SizedBox(height: 8),
+            if (_currentUrl.isNotEmpty)
+              Text(
+                _currentUrl,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 12,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            if (service.connectionState == StreamState.failed) ...[
               const SizedBox(height: 20),
               ElevatedButton.icon(
-                onPressed: () => service.connect(widget.serverUrl),
+                onPressed: _connect,
                 icon: const Icon(Icons.refresh),
-                label: const Text('Reconnect'),
+                label: const Text('Retry'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.blue,
                   foregroundColor: Colors.white,
