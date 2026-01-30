@@ -793,7 +793,7 @@ class WebRTCService extends ChangeNotifier {
   }
 
   /// Start talking (PTT pressed)
-  void startTalk() {
+  Future<void> startTalk() async {
     if (!_micInitialized || _localStream == null) {
       debugPrint('[WebRTC] Cannot start talk: mic not initialized');
       return;
@@ -804,12 +804,28 @@ class WebRTCService extends ChangeNotifier {
       return;
     }
 
+    // Ensure audio track is added to peer connection
+    await _addLocalAudioTrack();
+
     debugPrint('[WebRTC] PTT: Starting talk');
     _isTalking = true;
 
-    // Enable audio track
-    for (final track in _localStream!.getAudioTracks()) {
+    // Enable audio track and log state
+    final audioTracks = _localStream!.getAudioTracks();
+    debugPrint('[WebRTC] PTT: Enabling ${audioTracks.length} audio tracks');
+    for (final track in audioTracks) {
       track.enabled = true;
+      debugPrint('[WebRTC] PTT: Audio track ${track.id} enabled: ${track.enabled}');
+    }
+
+    // Check if we have senders
+    if (_peerConnection != null) {
+      final senders = await _peerConnection!.getSenders();
+      final audioSenders = senders.where((s) => s.track?.kind == 'audio').toList();
+      debugPrint('[WebRTC] PTT: Audio senders count: ${audioSenders.length}');
+      for (var sender in audioSenders) {
+        debugPrint('[WebRTC] PTT: Sender track: ${sender.track?.id}, enabled: ${sender.track?.enabled}');
+      }
     }
 
     // Schedule notifyListeners to avoid calling during touch handling
