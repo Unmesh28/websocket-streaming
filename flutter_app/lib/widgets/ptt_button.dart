@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 /// Push-to-Talk button widget
-/// Press and hold to talk, release to stop
-/// Uses raw Listener for reliable pointer events without gesture conflicts
-class PTTButton extends StatefulWidget {
+/// Toggle mode: Press once to start talking, press again to stop
+class PTTButton extends StatelessWidget {
   final bool enabled;
   final bool isTalking;
   final VoidCallback onTalkStart;
@@ -20,169 +19,82 @@ class PTTButton extends StatefulWidget {
     this.onRequestMic,
   });
 
-  @override
-  State<PTTButton> createState() => _PTTButtonState();
-}
+  void _onPressed() {
+    debugPrint('[PTT] Button pressed, enabled: $enabled, isTalking: $isTalking');
 
-class _PTTButtonState extends State<PTTButton>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
-  bool _isPressed = false;
-  bool _disposed = false;
-  int? _activePointerId;
-
-  @override
-  void initState() {
-    super.initState();
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 100),
-      vsync: this,
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.92).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _disposed = true;
-    // Make sure to stop talking when disposed
-    if (_isPressed && widget.enabled) {
-      _isPressed = false;
-      widget.onTalkEnd();
-    }
-    _animationController.dispose();
-    super.dispose();
-  }
-
-  void _onPointerDown(PointerDownEvent event) {
-    if (_disposed || _isPressed) return;
-
-    debugPrint('[PTT] Pointer down (id: ${event.pointer}), enabled: ${widget.enabled}');
-
-    if (!widget.enabled) {
-      widget.onRequestMic?.call();
+    if (!enabled) {
+      // If mic not enabled, try to request permission
+      onRequestMic?.call();
       return;
     }
 
-    _activePointerId = event.pointer;
-    _isPressed = true;
-
-    if (mounted && !_disposed) {
-      setState(() {});
-    }
-
-    _animationController.forward();
     HapticFeedback.mediumImpact();
 
-    debugPrint('[PTT] Starting talk');
-    widget.onTalkStart();
-  }
-
-  void _onPointerUp(PointerUpEvent event) {
-    if (_disposed) return;
-    if (event.pointer != _activePointerId) return;
-
-    debugPrint('[PTT] Pointer up (id: ${event.pointer})');
-    _release();
-  }
-
-  void _onPointerCancel(PointerCancelEvent event) {
-    if (_disposed) return;
-    if (event.pointer != _activePointerId) return;
-
-    debugPrint('[PTT] Pointer cancel (id: ${event.pointer})');
-    _release();
-  }
-
-  void _release() {
-    if (!_isPressed || _disposed) return;
-
-    debugPrint('[PTT] Releasing, stopping talk');
-    _isPressed = false;
-    _activePointerId = null;
-
-    if (mounted && !_disposed) {
-      setState(() {});
-    }
-
-    _animationController.reverse();
-
-    if (widget.enabled) {
-      widget.onTalkEnd();
+    if (isTalking) {
+      debugPrint('[PTT] Stopping talk');
+      onTalkEnd();
+    } else {
+      debugPrint('[PTT] Starting talk');
+      onTalkStart();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool isActive = widget.isTalking || _isPressed;
-
-    // Use Listener for raw pointer events - no gesture recognition conflicts
-    return Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: _onPointerDown,
-      onPointerUp: _onPointerUp,
-      onPointerCancel: _onPointerCancel,
-      child: AnimatedBuilder(
-        animation: _scaleAnimation,
-        builder: (context, child) {
-          return Transform.scale(
-            scale: _scaleAnimation.value,
-            child: Container(
-              width: 90,
-              height: 90,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: widget.enabled
-                      ? (isActive
-                          ? [Colors.red.shade400, Colors.red.shade700]
-                          : [Colors.blue.shade400, Colors.blue.shade700])
-                      : [Colors.grey.shade500, Colors.grey.shade700],
-                ),
-                border: Border.all(
-                  color: Colors.white.withOpacity(0.3),
-                  width: 3,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: isActive
-                        ? Colors.red.withOpacity(0.5)
-                        : Colors.black.withOpacity(0.3),
-                    blurRadius: isActive ? 15 : 10,
-                    spreadRadius: isActive ? 2 : 0,
-                  ),
-                ],
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    widget.enabled
-                        ? (isActive ? Icons.mic : Icons.mic_none)
-                        : Icons.mic_off,
-                    color: Colors.white,
-                    size: 32,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    widget.enabled
-                        ? (isActive ? 'TALKING' : 'TALK')
-                        : 'NO MIC',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
+    return GestureDetector(
+      onTap: _onPressed,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 90,
+        height: 90,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: enabled
+                ? (isTalking
+                    ? [Colors.red.shade400, Colors.red.shade700]
+                    : [Colors.blue.shade400, Colors.blue.shade700])
+                : [Colors.grey.shade500, Colors.grey.shade700],
+          ),
+          border: Border.all(
+            color: Colors.white.withOpacity(0.3),
+            width: 3,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: isTalking
+                  ? Colors.red.withOpacity(0.5)
+                  : Colors.black.withOpacity(0.3),
+              blurRadius: isTalking ? 15 : 10,
+              spreadRadius: isTalking ? 2 : 0,
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              enabled
+                  ? (isTalking ? Icons.mic : Icons.mic_none)
+                  : Icons.mic_off,
+              color: Colors.white,
+              size: 32,
+            ),
+            const SizedBox(height: 2),
+            Text(
+              enabled
+                  ? (isTalking ? 'STOP' : 'TALK')
+                  : 'NO MIC',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
               ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
